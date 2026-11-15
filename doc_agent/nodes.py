@@ -4,12 +4,8 @@ Graph nodes. Each node: takes state -> returns a PARTIAL state update (a dict).
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from .llm import get_llm
-from .prompts import PLANNER_PROMPT, RESEARCHER_PROMPT, SCRIPT_WRITER_PROMPT
-from .state import DocState, ResearchNote, ResearchPlan, ResearchTask, Script
-from .tools import web_search
 from langchain.agents import create_agent
 from langgraph.errors import GraphRecursionError
-
 from .prompts import FACT_CHECKER_PROMPT, PLANNER_PROMPT, RESEARCHER_PROMPT, SCRIPT_WRITER_PROMPT
 from .state import DocState, FactCheckReport, ResearchNote, ResearchPlan, ResearchTask, Script
 from .tools import search_web, web_search, wikipedia_lookup
@@ -68,7 +64,6 @@ def research_subtopic(task: ResearchTask) -> dict:
         f"[{i}] {r['title']}\nURL: {r['url']}\n{r['content']}"
         for i, r in enumerate(results, 1)
     )
-    researcher = get_llm().with_structured_output(ResearchNote)
     issues = task.get("issues", [])
     feedback = ""
     if issues:
@@ -133,14 +128,6 @@ def write_script(state: DocState) -> dict:
     script = writer.invoke(messages)
     return {"script": script}
 
-def format_notes(notes: list[ResearchNote]) -> str:
-    return "\n\n".join(
-        f"## {n.subtopic}\n{n.summary}\n"
-        + "\n".join(f"- {f.claim} (source: {f.source_url})" for f in n.facts)
-        for n in notes
-    )
-
-
 def fact_check(state: DocState) -> dict:
     rounds = state.get("research_rounds", 0) + 1
 
@@ -177,8 +164,6 @@ def fact_check(state: DocState) -> dict:
         "research_rounds": rounds,
     }
 MAX_ROUNDS = 2
-
-
 def route_after_fact_check(state: DocState):
     """Loop back to research weak subtopics, or move on to the script."""
     # Only trust names that really are subtopics (LLMs sometimes rename things)

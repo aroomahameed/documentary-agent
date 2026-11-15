@@ -76,11 +76,6 @@ class DocState(TypedDict, total=False):
     # --- planner ---
     title: str
     subtopics: list[str]
-
-    # --- researchers (run in PARALLEL) ---
-    # `operator.add` is a REDUCER: each parallel researcher returns
-    # {"research": [note]} and LangGraph concatenates the lists instead of
-    # letting the last writer overwrite everyone else.
     research: Annotated[list[ResearchNote], merge_research]
     unverified_claims: Annotated[list[str], operator.add] 
 

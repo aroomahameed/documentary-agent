@@ -1,175 +1,154 @@
 # 🎬 Documentary Agent
 
-A multi-agent system built with **LangGraph** that turns a topic into a narrated mini-documentary video: research → fact-check → script → human review → visuals + voiceover → rendered video.
+A multi-agent system built with **LangGraph** that researches any topic, fact-checks its own findings, and writes a narrated documentary script, with a human director approving every script before it's final.
 
-Each stage of this project teaches one core LangGraph concept.
+> **Status:** Stages 1–3 of 8 complete (research → fact-check → script → human review, with persistence and time travel). Video production (visuals, voiceover, rendering) is next. See the [roadmap](#roadmap).
+
+**Example output:** [a 1-minute script on Mughal architecture](examples/script.md), rewritten for kids using time travel.
 
 ---
 
-## Quick start (Stage 1)
+## How it works
 
-```bash
-python main.py "History of Mughal architecture" --thread mughal-1   # new run, pauses for your review
-python main.py --thread mughal-1                                    # resume a paused run
-python main.py --thread mughal-1 --history                          # list all saved checkpoints
-python main.py --thread mughal-1 --fork "Rewrite it for kids"       # time travel: new script version
-python main.py --draw                                               # print the graph diagram
+```mermaid
+graph TD
+    START([start]) --> planner
+    planner -. "Send × N (parallel)" .-> researcher
+    researcher --> fact_checker
+    fact_checker -. "contradicted claims<br/>(max 2 rounds)" .-> researcher
+    fact_checker -. "verified / limit reached" .-> script_writer
+    script_writer --> human_review
+    human_review -. "feedback" .-> script_writer
+    human_review -. "approve" .-> END([end])
 ```
 
-Output goes to `output/<topic>/script.md` and `script.json`.
+| Node              | What it does                                                                                                                                                 | Type                   |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
+| **planner**       | Splits the topic into 3–5 subtopics in story order                                                                                                           | LLM, structured output |
+| **researcher**    | Searches the web for one subtopic and extracts sourced facts. One copy runs per subtopic, **in parallel**                                                    | Fixed workflow + LLM   |
+| **fact_checker**  | A ReAct agent that **chooses its own tools** (Wikipedia or web search) to verify key claims, and labels each one _confirmed_, _contradicted_ or _unverified_ | Autonomous agent       |
+| **script_writer** | Writes scenes (narration + visual description + sources). Hedges unverified claims and avoids contradicted ones                                              | LLM, structured output |
+| **human_review**  | **Pauses the graph** and waits for the director to approve or give feedback                                                                                  | Human-in-the-loop      |
+
+Contradicted claims send only the affected subtopics back for re-research, with the fact-checker's corrections attached. Every step is saved to SQLite, so a run can be stopped and resumed at any time, or rewound to an earlier point to create a different version.
+
+## Features
+
+- **Parallel research** with the Send API: all subtopics are researched at the same time
+- **Self-correcting loop:** the fact-checker sends weak research back, limited to 2 rounds
+- **Autonomous tool use:** the fact-checker decides which tool to call and when
+- **Human-in-the-loop review:** approve the script, or type feedback and get a revision
+- **Persistence:** kill the program at any point and resume the same run later, without repeating work
+- **Time travel:** rewind a finished run to just after research and generate a new version (e.g. "for kids") without paying for research again
+- **Provider-agnostic:** works with Anthropic, OpenAI, Groq or Gemini by changing one environment variable
+
+## LangGraph concepts used
+
+| Concept                                  | Where                                                                                |
+| ---------------------------------------- | ------------------------------------------------------------------------------------ |
+| `Send` API (dynamic fan-out)             | planner → parallel researchers; fact-checker → re-research of weak subtopics only    |
+| Custom reducer                           | `merge_research` **replaces** a subtopic's old note instead of appending a duplicate |
+| `operator.add` reducer                   | collecting unverified claims across rounds                                           |
+| Conditional edges and cycles             | the research ↔ fact-check loop, with a round limit                                   |
+| Agent as a node                          | `create_agent` with tools and a `response_format` runs inside the main graph         |
+| `interrupt()` + `Command(resume=...)`    | pausing for human review and resuming with the decision                              |
+| `Command(goto=..., update=...)`          | the review node routes itself and updates state in one return                        |
+| `SqliteSaver` checkpointer + `thread_id` | persistence across restarts, many independent runs                                   |
+| `get_state_history` + `update_state`     | time travel: branching from a past checkpoint                                        |
+| `stream_mode="updates"`                  | live progress in the terminal                                                        |
+
+## Design decisions
+
+- **The LLM classifies; code decides.** Early versions asked the fact-checker which subtopics were "weak". It ignored the prompt's rules and flagged nearly everything, even confirmed facts. Now it only labels each claim, and code decides that a subtopic is weak only if a claim is _contradicted_. Prompts are suggestions; structure is enforced.
+- **Never trust identifiers from an LLM.** The fact-checker sometimes invented its own subtopic names. It now refers to subtopics by number, and code maps numbers back to real names, ignoring invalid ones.
+- **A retry limit needs a fallback.** Re-research can introduce new errors. If the round limit is reached, the remaining corrections are passed to the script writer as "do not use these claims".
+- **Agentic only where it adds value.** Research is a fixed workflow (always search, then summarize), while fact-checking is agentic, because choosing _how_ to verify a claim is a real decision.
+- **Errors are information.** A failed search or tool call returns a message instead of crashing, so the run continues and the agent can try another way.
+
+## Setup
+
+Requires Python 3.11+.
+
+```bash
+git clone https://github.com/aroomahameed/documentary-agent.git
+cd documentary-agent
+python -m venv .venv
+.venv\Scripts\activate            # Windows
+# source .venv/bin/activate       # macOS / Linux
+pip install -r requirements.txt
+```
+
+Create a `.env` file in the project root:
+
+```
+MODEL=anthropic:claude-haiku-5-5
+ANTHROPIC_API_KEY=your-key
+TAVILY_API_KEY=your-key           # free tier at tavily.com
+
+# Optional: tracing in LangSmith
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your-key
+LANGSMITH_PROJECT=documentary-agent
+```
+
+To use another provider, change `MODEL` (e.g. `openai:gpt-4o-mini`) and install its LangChain package (e.g. `langchain-openai`).
+
+## Usage
+
+```bash
+# Start a new run. It pauses when the script is ready for your review.
+python main.py "History of Mughal architecture" --thread mughal-1
+
+# Resume a paused run (e.g. after closing the program)
+python main.py --thread mughal-1
+
+# List every saved checkpoint of a run (newest first)
+python main.py --thread mughal-1 --history
+
+# Time travel: rewind to just after research and write a new version
+python main.py --thread mughal-1 --fork "Rewrite it for 10-year-old kids"
+
+# Print the graph as a Mermaid diagram
+python main.py --draw
+```
+
+Options: `--minutes N` sets the target length (default 1).
+
+At the review step, press **Enter** to approve, or type feedback to get a revised script. Approved scripts are saved to `output/<topic>-<thread>/script.md` and `script.json` (forks add `-fork` to the folder name).
 
 ## Project structure
 
 ```
 doc_agent/
-  state.py     # Pydantic models (LLM outputs) + graph state (TypedDict)
-  prompts.py   # all prompts in one place
-  llm.py       # provider-agnostic model (switch with MODEL env var)
-  tools.py     # external tools (web search, later: images, TTS)
-  nodes.py     # graph nodes
-  graph.py     # wiring: nodes + edges
-main.py        # CLI with live progress streaming
-tests/         # offline tests with a fake LLM
+  state.py      # Pydantic models (LLM outputs), graph state, custom reducer
+  prompts.py    # all prompts in one place
+  llm.py        # provider-agnostic model loader (MODEL env var)
+  tools.py      # web search + Wikipedia tools
+  nodes.py      # graph nodes and routing
+  graph.py      # wiring: nodes and edges
+main.py         # CLI: run, resume, review, history, time travel
+examples/       # sample output
+tests/          # offline tests with a fake LLM
+LEARNINGS.md    # what I learned at each stage
 ```
-
----
 
 ## Roadmap
 
-### ✅ Stage 1: Research → Script
+- [x] **Stage 1: Research → Script.** Parallel research with the Send API and reducers
+- [x] **Stage 2: Fact-checking loop.** A ReAct agent with tools, cycles with limits, a custom reducer
+- [x] **Stage 3: Human review and persistence.** `interrupt`, checkpointer, resume, time travel
+- [ ] **Stage 4: Scene production.** A subgraph per scene: find visuals, generate voiceover (`edge-tts`)
+- [ ] **Stage 5: Assembly.** Quality check, preview approval, render the video (`moviepy`)
+- [ ] **Stage 6: UI.** Live progress streaming in a web interface
+- [ ] **Stage 7: Multi-agent and styles.** A supervisor, style presets, English + Urdu narration
+- [ ] **Stage 8: MCP.** Expose the tools as an MCP server
 
-```
-START → planner ─(Send × N)→ researcher → script_writer → END
-```
+## Known limitations
 
-**Concepts:** `StateGraph`, TypedDict state, structured output with Pydantic, the **Send API** (dynamic parallel fan-out), **reducers** (`Annotated[list, operator.add]`), fan-in, `stream_mode="updates"`.
+- The fact-checker is an LLM too and can make its own mistakes (in one run it wrongly "corrected" the Taj Mahal's location). Its findings improve accuracy but don't guarantee it.
+- Sources that disagree on small details (e.g. distances) are sometimes still flagged as contradictions.
+- The offline tests are being updated for the Stage 2–3 graph.
 
-**Your tasks before moving on:**
+## Tech stack
 
-- [ ] Run it on 3 different topics and read the scripts critically.
-- [ ] Turn on LangSmith tracing (see `.env.example`) and look at a full trace. Confirm the researchers really ran in parallel.
-- [ ] Remove `operator.add` from `research` in `state.py` and run it again. Note what breaks and _why_ in `LEARNINGS.md`.
-- [ ] Add Wikipedia as a second source inside `research_subtopic`.
-
----
-
-### ✅ Stage 2: Fact-checker with a feedback loop
-
-```
-... → researcher → fact_checker ─(issues & rounds < 2)→ re-research weak subtopics
-                               └─(ok)→ script_writer
-```
-
-**Concepts:** conditional edges, cycles, loop limits, and your first **real ReAct agent**: the fact-checker _chooses_ its own tools (`web_search`, `wikipedia_lookup`) to verify claims.
-
-**Build:**
-
-- A `fact_checker` node that uses `create_react_agent` (from `langgraph.prebuilt`) or your own `ToolNode` loop, with tools decorated with `@tool`.
-- It returns `fact_check_issues: list[str]` and which subtopics need more research.
-- A router function: if there are issues and `research_rounds < 2`, Send only the weak subtopics back to `researcher`; otherwise go to `script_writer`.
-
-**Watch out:** the `research` reducer _appends_. When re-researching, old notes stay. Decide how to replace them (hint: a custom reducer function that replaces notes by subtopic).
-
-**Lesson:** compare the fixed workflow (Stage 1 researcher) with the agentic step (fact-checker) and write down when each one makes sense.
-
----
-
-### ✅ Stage 3: Human review and persistence
-
-```
-... → script_writer → human_review ─(approve)→ END (for now)
-                                   └─(edit / reject + feedback)→ script_writer
-```
-
-**Concepts:** `interrupt()`, `Command(resume=...)`, checkpointers, `thread_id`, resuming after a crash, **time travel**.
-
-**Hints:**
-
-```python
-from langgraph.types import interrupt, Command
-from langgraph.checkpoint.sqlite import SqliteSaver   # pip install langgraph-checkpoint-sqlite
-
-def human_review(state):
-    decision = interrupt({"script": state["script"].model_dump(),
-                          "question": "approve / reject (with feedback)?"})
-    if decision["action"] == "approve":
-        return Command(goto=END)
-    return Command(goto="script_writer", update={"human_feedback": decision["feedback"]})
-
-with SqliteSaver.from_conn_string("checkpoints.db") as cp:
-    graph = build_graph(checkpointer=cp)
-    config = {"configurable": {"thread_id": "mughal-1"}}
-    graph.invoke(inputs, config)                                    # pauses at interrupt
-    graph.invoke(Command(resume={"action": "approve"}), config)     # continues
-```
-
-**Tasks:**
-
-- [ ] Kill the program while it's waiting for review. Restart it and resume the same `thread_id`.
-- [ ] Use `graph.get_state_history(config)` to go back to the state _before_ the script was written and fork a new version with a different tone.
-
----
-
-### Stage 4: Scene production subgraph
-
-```
-script approved ─(Send × scenes)→ [scene_subgraph] → collect
-scene_subgraph:  find_visual → generate_voiceover → measure_duration
-```
-
-**Concepts:** **subgraphs** with their own state schema, map-reduce over scenes, retries.
-
-**Tools:**
-
-- Images: Pexels API (free) or Wikimedia Commons, searched with `visual_description`. Let an LLM pick the best of 5 candidates.
-- Voice: `edge-tts` (free; English voices like `en-US-GuyNeural`, Urdu like `ur-PK-AsadNeural`)
-  ```python
-  import edge_tts
-  await edge_tts.Communicate(text, "en-US-GuyNeural").save("scene_1.mp3")
-  ```
-- Add a `RetryPolicy` to flaky nodes (`builder.add_node("find_visual", fn, retry_policy=RetryPolicy(max_attempts=3))`).
-
-**Watch out:** media files go to disk. Only _paths_ go in state, never raw bytes, because the checkpointer saves state after every step.
-
----
-
-### Stage 5: Assembly and quality check
-
-```
-collect → quality_checker ─(broken scenes)→ re-run only those scenes
-                         └─(ok)→ preview interrupt → render_video → END
-```
-
-**Concepts:** fixed pipeline steps inside an agent graph, a self-correcting loop, a second human checkpoint.
-
-- `moviepy` (v2): `ImageClip(img).with_duration(d).with_audio(AudioFileClip(mp3))`, then `concatenate_videoclips`.
-- The quality checker verifies files exist, durations make sense, and no scene is missing an image.
-- Bonus: add a slow zoom (Ken Burns effect), subtitles, and background music.
-
-**Task:** crash it on purpose during rendering, then resume. Only the unfinished work should re-run.
-
----
-
-### Stage 6: UI with live streaming
-
-**Concepts:** `stream_mode=["updates", "custom"]`, `get_stream_writer()` for custom progress events from inside nodes, and serving the graph over an API.
-
-- A Streamlit or FastAPI + Next.js frontend: a topic box → live progress → script review form (resumes the interrupt) → video player.
-
----
-
-### Stage 7: Multi-agent and style presets
-
-- Turn research, writing and production into separate agents coordinated by a **supervisor**.
-- Style presets: "Netflix", "Kids explainer", "YouTube Short (60s, vertical)". These change prompts, scene counts and aspect ratio.
-- Bilingual: generate English and Urdu narration from the same research.
-
----
-
-### Stage 8: MCP
-
-- Expose your tools (`search_images`, `text_to_speech`, `render_video`) as an **MCP server** using the official `mcp` Python SDK.
-- Connect your LangGraph agent to it with `langchain-mcp-adapters` instead of importing the functions directly.
-- Connect Claude Desktop to the same server, so another agent can now make videos with your tools.
-
----
+LangGraph · LangChain · Claude (Anthropic) · Tavily Search · Wikipedia API · SQLite · Pydantic
