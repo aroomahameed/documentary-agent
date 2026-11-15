@@ -147,7 +147,6 @@ LEARNINGS.md    # what I learned at each stage
 
 - The fact-checker is an LLM too and can make its own mistakes (in one run it wrongly "corrected" the Taj Mahal's location). Its findings improve accuracy but don't guarantee it.
 - Sources that disagree on small details (e.g. distances) are sometimes still flagged as contradictions.
-- The offline tests are being updated for the Stage 2–3 graph.
 
 ## Tech stack
 
