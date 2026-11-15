@@ -1,61 +1,271 @@
 """
-Tests that run WITHOUT API keys, by swapping the LLM and search for fakes.
-Testing agents offline like this is a habit worth building early.
+Offline tests for the Documentary Agent: no API keys, no network, no cost.
 
-    pytest -q
+We swap the real LLM, web search and fact-checker agent for FAKES whose answers
+we control. That lets us test the GRAPH LOGIC (fan-out, loops, reducers,
+interrupts, time travel) deterministically.
+
+    python -m pytest -q
 """
+
+import pytest
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from doc_agent import nodes
 from doc_agent.graph import build_graph
-from doc_agent.state import Fact, ResearchNote, ResearchPlan, Scene, Script
+from doc_agent.state import (
+    ClaimCheck,
+    Fact,
+    FactCheckReport,
+    ResearchNote,
+    ResearchPlan,
+    Scene,
+    Script,
+)
+
+SUBTOPICS = ["Origins", "Golden age", "Legacy"]
 
 
-class FakeStructured:
-    def __init__(self, schema):
-        self.schema = schema
+# ---------------------------------------------------------------------------
+# Fakes
+# ---------------------------------------------------------------------------
 
-    def invoke(self, messages):
-        if self.schema is ResearchPlan:
-            return ResearchPlan(title="Test Doc", subtopics=["Origins", "Golden age", "Legacy"])
-        if self.schema is ResearchNote:
-            return ResearchNote(
-                subtopic="?",
-                summary="A summary.",
-                facts=[Fact(claim="Something happened in 1600.", source_url="https://example.com")],
-            )
-        if self.schema is Script:
-            return Script(
-                title="Test Doc",
-                scenes=[Scene(scene_number=1, narration="Hello.", visual_description="A fort.")],
-            )
-        raise ValueError(self.schema)
+def confirmed(n: int = 1) -> ClaimCheck:
+    return ClaimCheck(subtopic_number=n, claim="ok claim", status="confirmed")
 
 
-class FakeLLM:
+def contradicted(n: int, claim: str = "bad claim", correction: str = "the real fact") -> ClaimCheck:
+    return ClaimCheck(subtopic_number=n, claim=claim, status="contradicted", correction=correction)
+
+
+def unverified(n: int, claim: str = "maybe claim") -> ClaimCheck:
+    return ClaimCheck(subtopic_number=n, claim=claim, status="unverified")
+
+
+class Fake:
+    """Controls every fake and records what the graph sent to them."""
+
+    def __init__(self):
+        self.fact_check_reports: list[FactCheckReport] = []  # one per fact-check round
+        self.researched: list[str] = []         # subtopics, in the order researched
+        self.researcher_prompts: list[str] = []
+        self.writer_prompts: list[str] = []
+        self.fact_check_inputs: list[str] = []
+        self.search_fails = False
+
+    # --- LLM with structured output ---
     def with_structured_output(self, schema):
-        return FakeStructured(schema)
+        fake = self
+
+        class Structured:
+            def invoke(self, messages):
+                text = "\n".join(m.content for m in messages)
+                if schema is ResearchPlan:
+                    return ResearchPlan(title="Test Doc", subtopics=SUBTOPICS)
+                if schema is ResearchNote:
+                    fake.researcher_prompts.append(text)
+                    return ResearchNote(
+                        subtopic="?",  # the node overwrites this with the real name
+                        summary="A summary.",
+                        facts=[Fact(claim="Something happened in 1600.", source_url="https://example.com")],
+                    )
+                if schema is Script:
+                    fake.writer_prompts.append(text)
+                    version = len(fake.writer_prompts)
+                    return Script(
+                        title="Test Doc",
+                        scenes=[Scene(scene_number=1, narration=f"Draft {version}.", visual_description="A fort.")],
+                    )
+                raise ValueError(f"unexpected schema {schema}")
+
+        return Structured()
+
+    # --- web search used by the researcher ---
+    def web_search(self, query, max_results=4):
+        if self.search_fails:
+            raise ConnectionError("API down")
+        self.researched.append(query.split(": ", 1)[1])
+        return [{"title": "t", "url": "https://example.com", "content": "c"}]
+
+    # --- the fact-checker agent ---
+    def create_agent(self, model, tools, system_prompt, response_format):
+        fake = self
+
+        class Agent:
+            def invoke(self, inputs, config=None):
+                fake.fact_check_inputs.append(inputs["messages"][0].content)
+                # Default to "all confirmed" once the scripted reports run out.
+                report = fake.fact_check_reports.pop(0) if fake.fact_check_reports \
+                    else FactCheckReport(checks=[confirmed(1)])
+                return {"structured_response": report}
+
+        return Agent()
 
 
-def test_full_stage1_run(monkeypatch):
-    monkeypatch.setattr(nodes, "get_llm", lambda: FakeLLM())
-    monkeypatch.setattr(
-        nodes, "web_search",
-        lambda q, max_results=4: [{"title": "t", "url": "https://example.com", "content": "c"}],
-    )
-
-    result = build_graph().invoke({"topic": "Mughal architecture", "target_minutes": 1})
-
-    # One research note per subtopic, merged by the reducer
-    assert sorted(n.subtopic for n in result["research"]) == ["Golden age", "Legacy", "Origins"]
-    assert result["script"].scenes[0].narration == "Hello."
+@pytest.fixture
+def fake(monkeypatch):
+    f = Fake()
+    monkeypatch.setattr(nodes, "get_llm", lambda: f)
+    monkeypatch.setattr(nodes, "web_search", f.web_search)
+    monkeypatch.setattr(nodes, "create_agent", f.create_agent)
+    return f
 
 
-def test_search_failure_does_not_crash(monkeypatch):
-    def broken_search(q, max_results=4):
-        raise ConnectionError("API down")
+@pytest.fixture
+def graph():
+    # InMemorySaver: a checkpointer that lives only for the test (no file on disk).
+    return build_graph(checkpointer=InMemorySaver())
 
-    monkeypatch.setattr(nodes, "get_llm", lambda: FakeLLM())
-    monkeypatch.setattr(nodes, "web_search", broken_search)
 
-    result = build_graph().invoke({"topic": "x", "target_minutes": 1})
-    assert all(n.summary == "No sources found." for n in result["research"])
+def config(thread="t1"):
+    return {"configurable": {"thread_id": thread}}
+
+
+def start(graph, thread="t1"):
+    """Run a new thread until it pauses (or ends). Returns the latest snapshot."""
+    graph.invoke({"topic": "Mughal architecture", "target_minutes": 1}, config(thread))
+    return graph.get_state(config(thread))
+
+
+def resume(graph, decision, thread="t1"):
+    graph.invoke(Command(resume=decision), config(thread))
+    return graph.get_state(config(thread))
+
+
+# ---------------------------------------------------------------------------
+# Stage 1: parallel research
+# ---------------------------------------------------------------------------
+
+def test_researches_every_subtopic_once(fake, graph):
+    snap = start(graph)
+
+    assert sorted(fake.researched) == sorted(SUBTOPICS)
+    assert sorted(n.subtopic for n in snap.values["research"]) == sorted(SUBTOPICS)
+
+
+def test_search_failure_does_not_crash(fake, graph):
+    fake.search_fails = True
+    snap = start(graph)
+
+    assert all(n.summary == "No sources found." for n in snap.values["research"])
+    assert snap.next == ("human_review",)  # the run still reached review
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: fact-check loop
+# ---------------------------------------------------------------------------
+
+def test_all_confirmed_goes_straight_to_script(fake, graph):
+    fake.fact_check_reports = [FactCheckReport(checks=[confirmed(1), confirmed(2)])]
+    snap = start(graph)
+
+    assert len(fake.researched) == 3          # no re-research
+    assert snap.values["research_rounds"] == 1
+    assert len(fake.writer_prompts) == 1
+
+
+def test_contradiction_reresearches_only_that_subtopic(fake, graph):
+    fake.fact_check_reports = [
+        FactCheckReport(checks=[contradicted(2, "Built in 1500", "Built in 1632")]),
+        FactCheckReport(checks=[confirmed(1)]),
+    ]
+    snap = start(graph)
+
+    # 3 initial researches + 1 re-research of subtopic #2 ("Golden age")
+    assert fake.researched[3:] == ["Golden age"]
+    # The re-researcher was told what to fix
+    assert "Built in 1632" in fake.researcher_prompts[-1]
+    # Round 2 only re-checked the re-researched subtopic
+    assert "Golden age" in fake.fact_check_inputs[1]
+    assert "Origins" not in fake.fact_check_inputs[1]
+    assert snap.values["research_rounds"] == 2
+
+
+def test_merge_reducer_replaces_old_note(fake, graph):
+    fake.fact_check_reports = [FactCheckReport(checks=[contradicted(1)])]
+    snap = start(graph)
+
+    # Re-research REPLACED the note: still exactly one note per subtopic
+    assert len(snap.values["research"]) == 3
+    assert sorted(n.subtopic for n in snap.values["research"]) == sorted(SUBTOPICS)
+
+
+def test_round_limit_passes_corrections_to_writer(fake, graph):
+    fake.fact_check_reports = [
+        FactCheckReport(checks=[contradicted(1, "Wrong A", "Fix A")]),
+        FactCheckReport(checks=[contradicted(1, "Wrong B", "Fix B")]),
+    ]
+    snap = start(graph)
+
+    assert snap.values["research_rounds"] == 2          # stopped at MAX_ROUNDS
+    assert len(fake.researched) == 4                    # only ONE re-research round
+    assert "found WRONG" in fake.writer_prompts[0]      # fallback: writer was warned
+    assert "Fix B" in fake.writer_prompts[0]
+
+
+def test_unverified_claims_are_hedged_not_reresearched(fake, graph):
+    fake.fact_check_reports = [FactCheckReport(checks=[unverified(1, "It ran out of water")])]
+    snap = start(graph)
+
+    assert len(fake.researched) == 3                    # unverified does NOT trigger re-research
+    assert snap.values["unverified_claims"] == ["It ran out of water"]
+    assert "It ran out of water" in fake.writer_prompts[0]
+
+
+def test_invalid_subtopic_number_is_ignored(fake, graph):
+    fake.fact_check_reports = [FactCheckReport(checks=[contradicted(99)])]
+    snap = start(graph)
+
+    assert snap.values["weak_subtopics"] == []          # LLM's bad number didn't cause a loop
+    assert len(fake.researched) == 3
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: human review, persistence, time travel
+# ---------------------------------------------------------------------------
+
+def test_pauses_for_review_then_approve_ends(fake, graph):
+    snap = start(graph)
+    assert snap.next == ("human_review",)               # paused, waiting for a human
+
+    snap = resume(graph, {"action": "approve"})
+    assert snap.next == ()                              # finished
+    assert snap.values["script"].scenes[0].narration == "Draft 1."
+
+
+def test_feedback_revises_script_and_pauses_again(fake, graph):
+    start(graph)
+    snap = resume(graph, {"action": "revise", "feedback": "More dramatic please"})
+
+    assert snap.next == ("human_review",)               # asks again after revising
+    assert "More dramatic please" in fake.writer_prompts[-1]
+    assert "previous draft" in fake.writer_prompts[-1]
+    assert snap.values["script"].scenes[0].narration == "Draft 2."
+
+
+def test_threads_are_independent(fake, graph):
+    start(graph, thread="a")
+    resume(graph, {"action": "approve"}, thread="a")
+    snap_b = start(graph, thread="b")
+
+    assert graph.get_state(config("a")).next == ()
+    assert snap_b.next == ("human_review",)
+
+
+def test_time_travel_fork_rewrites_without_new_research(fake, graph):
+    start(graph)
+    resume(graph, {"action": "approve"})
+    searches_before = len(fake.researched)
+
+    # Same logic as main.py --fork: find the original checkpoint before script_writer
+    history = list(graph.get_state_history(config()))
+    target = next(s for s in reversed(history) if s.next == ("script_writer",))
+    graph.update_state(target.config, {"human_feedback": "For kids"})
+    graph.invoke(None, config())
+
+    snap = graph.get_state(config())
+    assert len(fake.researched) == searches_before      # no new research
+    assert "Director's notes" in fake.writer_prompts[-1]
+    assert "For kids" in fake.writer_prompts[-1]
+    assert snap.next == ("human_review",)               # the fork also waits for review
