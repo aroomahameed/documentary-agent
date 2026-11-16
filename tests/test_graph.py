@@ -12,7 +12,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from doc_agent import nodes
+from doc_agent import nodes, production
 from doc_agent.graph import build_graph
 from doc_agent.state import (
     ClaimCheck,
@@ -53,6 +53,9 @@ class Fake:
         self.writer_prompts: list[str] = []
         self.fact_check_inputs: list[str] = []
         self.search_fails = False
+        self.voice_choice = "en-GB-RyanNeural"
+        self.tts_calls: list[str] = []      # voices used, one per narrated scene
+        self.tts_fails = False
 
     # --- LLM with structured output ---
     def with_structured_output(self, schema):
@@ -60,7 +63,8 @@ class Fake:
 
         class Structured:
             def invoke(self, messages):
-                text = "\n".join(m.content for m in messages)
+                text = "\n".join(m.content if isinstance(m.content, str) else str(m.content)
+                                 for m in messages)
                 if schema is ResearchPlan:
                     return ResearchPlan(title="Test Doc", subtopics=SUBTOPICS)
                 if schema is ResearchNote:
@@ -75,8 +79,23 @@ class Fake:
                     version = len(fake.writer_prompts)
                     return Script(
                         title="Test Doc",
-                        scenes=[Scene(scene_number=1, narration=f"Draft {version}.", visual_description="A fort.")],
+                        scenes=[
+                            Scene(scene_number=1, narration=f"Draft {version}.", visual_description="A fort."),
+                            Scene(scene_number=2, narration="Second scene.", visual_description="A garden."),
+                        ],
                     )
+                # --- Stage 4: scene production ---
+                if schema is production.VoiceChoice:
+                    return production.VoiceChoice(voice=fake.voice_choice, reason="test")
+                if schema is production.ShotPlan:
+                    return production.ShotPlan(
+                        shots=[production.ShotIdea(description="a fort", kind="photo", queries=["fort"])],
+                        fallback_queries=["castle"],
+                    )
+                if schema is production.ImageChoice:
+                    return production.ImageChoice(number=1, reason="test")
+                if schema is production.ImageCheck:
+                    return production.ImageCheck(shows="a fort", matches=True)
                 raise ValueError(f"unexpected schema {schema}")
 
         return Structured()
@@ -103,12 +122,40 @@ class Fake:
         return Agent()
 
 
+    # --- Stage 4 media: no network, tiny fake files ---
+    def search_photos(self, query, n=5, kind="photo"):
+        return [{"alt": f"{query} image", "url": f"https://img/{query}", "thumb": "t",
+                 "author": "Tester", "license": "CC0", "page": "https://page"}]
+
+    @staticmethod
+    def download(url, path, fallback_url=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fake image")
+        return path
+
+    def text_to_speech(self, text, path, voice=None):
+        if self.tts_fails:
+            raise ConnectionError("TTS down")
+        self.tts_calls.append(voice)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fake mp3")
+        return path
+
+
 @pytest.fixture
-def fake(monkeypatch):
+def fake(monkeypatch, tmp_path):
     f = Fake()
+    monkeypatch.chdir(tmp_path)                 # output/ is created inside a temp folder
+    monkeypatch.delenv("TTS_VOICE", raising=False)
     monkeypatch.setattr(nodes, "get_llm", lambda: f)
     monkeypatch.setattr(nodes, "web_search", f.web_search)
     monkeypatch.setattr(nodes, "create_agent", f.create_agent)
+    monkeypatch.setattr(production, "get_llm", lambda: f)
+    monkeypatch.setattr(production, "search_photos", f.search_photos)
+    monkeypatch.setattr(production, "download", f.download)
+    monkeypatch.setattr(production, "image_preview_b64", lambda path: "ZmFrZQ==")
+    monkeypatch.setattr(production, "text_to_speech", f.text_to_speech)
+    monkeypatch.setattr(production, "audio_duration", lambda path: 3.0)
     return f
 
 
@@ -269,3 +316,71 @@ def test_time_travel_fork_rewrites_without_new_research(fake, graph):
     assert "Director's notes" in fake.writer_prompts[-1]
     assert "For kids" in fake.writer_prompts[-1]
     assert snap.next == ("human_review",)               # the fork also waits for review
+
+# ---------------------------------------------------------------------------
+# Stage 4: scene production after approval
+# ---------------------------------------------------------------------------
+
+def test_approval_produces_every_scene(fake, graph):
+    start(graph)
+    snap = resume(graph, {"action": "approve"})
+
+    assert snap.next == ()                                      # ran to the end
+    produced = snap.values["produced_scenes"]
+    assert [p.scene_number for p in produced] == [1, 2]         # all scenes, in order
+    assert all(p.shots and p.audio_path for p in produced)
+    assert snap.values["voice"] == "en-GB-RyanNeural"
+
+
+def test_narrator_chosen_once_for_whole_documentary(fake, graph):
+    start(graph)
+    resume(graph, {"action": "approve"})
+
+    assert fake.tts_calls == ["en-GB-RyanNeural", "en-GB-RyanNeural"]   # same voice, every scene
+
+
+def test_made_up_voice_falls_back_to_default(fake, graph):
+    fake.voice_choice = "en-US-MadeUpNeural"
+    start(graph)
+    snap = resume(graph, {"action": "approve"})
+
+    assert snap.values["voice"] == production.DEFAULT_VOICE
+
+
+def test_manifest_written_for_stage5(fake, graph):
+    import json
+    from pathlib import Path
+
+    start(graph)
+    snap = resume(graph, {"action": "approve"})
+
+    manifest = json.loads(Path(snap.values["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["title"] == "Test Doc"
+    assert len(manifest["scenes"]) == 2
+    assert manifest["total_seconds"] == 6.0
+    assert manifest["credits"]                                  # every photo is credited
+
+
+def test_no_production_before_approval(fake, graph):
+    snap = start(graph)
+
+    assert snap.next == ("human_review",)
+    assert not snap.values.get("produced_scenes")    # reducer fields start as an empty list
+    assert fake.tts_calls == []
+
+
+def test_failed_production_can_be_resumed(fake, graph):
+    fake.tts_fails = True                       # every voice fails -> retries -> error
+    start(graph)
+    with pytest.raises(ConnectionError):
+        graph.invoke(Command(resume={"action": "approve"}), config())
+
+    snap = graph.get_state(config())
+    assert snap.next                            # stopped mid-run, NOT finished
+    assert not snap.interrupts                  # and NOT waiting for a human
+
+    fake.tts_fails = False                      # "fix the problem" ...
+    graph.invoke(None, config())                # ... and continue with None
+    snap = graph.get_state(config())
+    assert snap.next == ()
+    assert len(snap.values["produced_scenes"]) == 2

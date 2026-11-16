@@ -8,17 +8,45 @@ Two kinds of models live here:
 Rule of thumb: the LLM fills Pydantic models; the graph carries TypedDicts.
 """
 
+import json
 import operator
 from typing import Annotated, Literal, NotRequired, TypedDict 
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class LLMOutput(BaseModel):
+    """
+    Base class for every model an LLM fills (structured output).
+
+    LLMs occasionally return a nested list or object as a JSON *string*
+    ('[{"description": ...}]') instead of a real list. Rather than crash,
+    parse such strings, but only for fields that aren't meant to be text.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_json_strings(cls, data):
+        if not isinstance(data, dict):
+            return data
+        fixed = dict(data)
+        for name, value in data.items():
+            field = cls.model_fields.get(name)
+            if field is None or field.annotation is str or not isinstance(value, str):
+                continue
+            if value.strip()[:1] in ("[", "{"):
+                try:
+                    fixed[name] = json.loads(value)
+                except json.JSONDecodeError:
+                    pass                      # leave it: Pydantic will report the real error
+        return fixed
 
 
 # ---------------------------------------------------------------------------
 # LLM output models
 # ---------------------------------------------------------------------------
 
-class ResearchPlan(BaseModel):
+class ResearchPlan(LLMOutput):
     """Planner output: how to split the topic."""
 
     title: str = Field(description="A catchy working title for the documentary")
@@ -27,12 +55,12 @@ class ResearchPlan(BaseModel):
     )
 
 
-class Fact(BaseModel):
+class Fact(LLMOutput):
     claim: str = Field(description="One specific, checkable fact (a date, number, name or event)")
     source_url: str = Field(description="URL of the source this fact came from")
 
 
-class ResearchNote(BaseModel):
+class ResearchNote(LLMOutput):
     """Researcher output for ONE subtopic."""
 
     subtopic: str
@@ -40,7 +68,7 @@ class ResearchNote(BaseModel):
     facts: list[Fact] = Field(description="4-8 key facts, each tied to a source URL")
 
 
-class Scene(BaseModel):
+class Scene(LLMOutput):
     """One scene of the script. Later stages attach media to it."""
 
     scene_number: int
@@ -53,9 +81,37 @@ class Scene(BaseModel):
     )
 
 
-class Script(BaseModel):
+class Script(LLMOutput):
     title: str
     scenes: list[Scene]
+
+
+class Shot(BaseModel):
+    """One image shown during a scene. A scene has 1-4 shots that change while the narrator speaks."""
+
+    image_path: str
+    kind: str                       # "photo", "artwork" or "title_card"
+    description: str                # what the picture editor wanted to show
+    credit: str = ""                # "Title by Author (CC BY 2.0) <page>", empty for title cards
+
+
+class ProducedScene(BaseModel):
+    """A scene with its media on disk (Stage 4). Only PATHS go in state, never file bytes."""
+
+    scene_number: int
+    narration: str
+    shots: list[Shot]
+    audio_path: str
+    duration_sec: float
+    problems: list[str] = Field(default_factory=list)   # e.g. "shot 2: nothing found"
+
+
+def merge_scenes(existing: list[ProducedScene] | None, new: list[ProducedScene]) -> list[ProducedScene]:
+    """Reducer: a re-produced scene REPLACES the old one with the same number. Kept in scene order."""
+    merged = {s.scene_number: s for s in (existing or [])}
+    for s in new:
+        merged[s.scene_number] = s
+    return [merged[k] for k in sorted(merged)]
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +144,14 @@ class DocState(TypedDict, total=False):
     weak_subtopics: list[str]
     research_rounds: int
     human_feedback: str
-    # produced_scenes: Annotated[list[...], operator.add]   # Stage 5
-    # video_path: str                        # Stage 6
+
+    # --- scene production (Stage 4) ---
+    media_dir: str                     # where this run's images and audio go
+    voice: str                         # narrator, chosen once for the whole documentary
+    produced_scenes: Annotated[list[ProducedScene], merge_scenes]   # filled in parallel
+    manifest_path: str                 # summary of everything produced
+
+    # video_path: str                  # Stage 5
 
 
 class ResearchTask(TypedDict):
@@ -97,12 +159,12 @@ class ResearchTask(TypedDict):
     subtopic: str
     issues: NotRequired[list[str]]  
 
-class ClaimCheck(BaseModel):
+class ClaimCheck(LLMOutput):
     subtopic_number: int = Field(description="The [number] of the subtopic this claim belongs to")
     claim: str = Field(description="The claim you checked, short")
     status: Literal["confirmed", "contradicted", "unverified"]
     correction: str = Field(default="", description="Only if contradicted: what reliable sources actually say")
 
 
-class FactCheckReport(BaseModel):
+class FactCheckReport(LLMOutput):
     checks: list[ClaimCheck]

@@ -9,7 +9,14 @@ from langgraph.errors import GraphRecursionError
 from .prompts import FACT_CHECKER_PROMPT, PLANNER_PROMPT, RESEARCHER_PROMPT, SCRIPT_WRITER_PROMPT
 from .state import DocState, FactCheckReport, ResearchNote, ResearchPlan, ResearchTask, Script
 from .tools import search_web, web_search, wikipedia_lookup
+from .production import choose_voice
+import json
+import re
+from datetime import datetime
+from pathlib import Path
 from typing import Literal
+
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, Send, interrupt
 
 WORDS_PER_MINUTE = 140
@@ -187,11 +194,59 @@ def format_notes(notes: list[ResearchNote]) -> str:
         for i, n in enumerate(notes, 1)
     )
 
-def human_review(state: DocState) -> Command[Literal["script_writer", "__end__"]]:
+def human_review(state: DocState) -> Command[Literal["script_writer", "start_production"]]:
     # interrupt() PAUSES the graph here and saves everything to the checkpointer.
     # Whatever you pass to Command(resume=...) later becomes the return value.
     decision = interrupt({"question": "Approve the script, or give feedback to revise it."})
 
     if decision["action"] == "approve":
-        return Command(goto="__end__")
+        return Command(goto="start_production")      # Stage 4: approved -> make the media
     return Command(goto="script_writer", update={"human_feedback": decision["feedback"]})
+
+# --- Stage 4: scene production ------------------------------------------------
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60]
+
+
+def start_production(state: DocState, config: RunnableConfig) -> dict:
+    """
+    Runs ONCE after the script is approved: picks the folder and the narrator.
+
+    A node can ask for `config` as a second parameter: that's how it reads the
+    thread_id. The timestamp gives every production its own folder, so a fork
+    (time travel) never overwrites an earlier version's media.
+    """
+    thread = config["configurable"]["thread_id"]
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    media_dir = Path("output") / f"{_slug(state['topic'])}-{thread}" / f"media-{stamp}"
+
+    voice, reason = choose_voice(f"{state['topic']}. {state['script'].title}")
+    print(f"🎙  Narrator: {voice} ({reason})")
+    return {"media_dir": str(media_dir), "voice": voice}
+
+
+def dispatch_scenes(state: DocState) -> list[Send]:
+    """Fan-out again: one scene_producer SUBGRAPH run per scene, all in parallel."""
+    return [
+        Send("scene_producer", {"scene": scene, "media_dir": state["media_dir"], "voice": state["voice"]})
+        for scene in state["script"].scenes
+    ]
+
+
+def collect_scenes(state: DocState) -> dict:
+    """Fan-in: runs once every scene is done. Writes a manifest for Stage 5 (video assembly)."""
+    media_dir = Path(state["media_dir"])
+    media_dir.mkdir(parents=True, exist_ok=True)
+    scenes = state.get("produced_scenes", [])
+    manifest = {
+        "title": state["script"].title,
+        "voice": state["voice"],
+        "total_seconds": round(sum(s.duration_sec for s in scenes), 1),
+        "scenes": [s.model_dump() for s in scenes],
+        "credits": [shot.credit for s in scenes for shot in s.shots if shot.credit],
+    }
+    path = media_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    (media_dir / "script.json").write_text(state["script"].model_dump_json(indent=2), encoding="utf-8")
+    return {"manifest_path": str(path)}

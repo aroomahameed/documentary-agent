@@ -27,6 +27,8 @@ SAFE_TYPES = [
     ("doc_agent.state", "Fact"),
     ("doc_agent.state", "Script"),
     ("doc_agent.state", "Scene"),
+    ("doc_agent.state", "ProducedScene"),
+    ("doc_agent.state", "Shot"),
 ]
 
 
@@ -74,6 +76,16 @@ def print_update(update: dict) -> None:
                 print(f"   ❌ {i}")
         elif node == "script_writer":
             print(f"✍️  Script ready: {len(data['script'].scenes)} scenes")
+        elif node == "start_production":
+            print(f"🎬 Producing scenes into {data['media_dir']}")
+        elif node == "scene_producer":
+            p = data["produced_scenes"][0]
+            kinds = ", ".join(s.kind for s in p.shots)
+            print(f"   🎞  scene {p.scene_number}: {p.duration_sec:.1f}s, {len(p.shots)} shot(s): {kinds}")
+            for problem in p.problems:
+                print(f"      ⚠ {problem}")
+        elif node == "collect_scenes":
+            print(f"📦 Manifest: {data['manifest_path']}")
 
 
 def ask_human(script) -> dict:
@@ -137,9 +149,15 @@ def main() -> None:
             # The original timeline stays in history untouched.
             graph.update_state(target.config, {"human_feedback": args.fork})
             next_input = None  # None = "continue from the latest checkpoint" (our new fork)
-        elif snapshot.next:
-            print(f"⏯  Resuming thread '{args.thread}' (paused at {snapshot.next})")
+        elif snapshot.interrupts:
+            # Paused at human review: ask again
+            print(f"⏯  Resuming thread '{args.thread}' (waiting for your review)")
             next_input = Command(resume=ask_human(snapshot.values["script"]))
+        elif snapshot.next:
+            # Stopped mid-run (crash, Ctrl+C, network error): just continue.
+            # Work that already finished (e.g. scenes already produced) is NOT redone.
+            print(f"⏯  Continuing unfinished thread '{args.thread}' at {snapshot.next}")
+            next_input = None
         elif snapshot.values:
             print(f"Thread '{args.thread}' is already finished. Use a new --thread name.")
             return
@@ -155,7 +173,7 @@ def main() -> None:
                 print_update(update)
 
             snapshot = graph.get_state(config)
-            if not snapshot.next:  # nothing left to run: the graph reached END
+            if not snapshot.interrupts:  # not waiting for a human: the graph reached END
                 break
             next_input = Command(resume=ask_human(snapshot.values["script"]))
 
@@ -163,9 +181,15 @@ def main() -> None:
         folder = f"{slugify(snapshot.values['topic'])}-{args.thread}" + ("-fork" if args.fork else "")
         out_dir = Path("output") / folder
         save_script(script, out_dir)
-        print(f"\n✅ Approved and saved to {out_dir}/script.md")
+        print(f"\n✅ Script saved to {out_dir}/script.md")
+        if snapshot.values.get("manifest_path"):
+            print(f"✅ Media and manifest in {Path(snapshot.values['manifest_path']).parent}")
     except KeyboardInterrupt:
         print(f"\n⏸  Stopped. Everything is saved. Resume with: python main.py --thread {args.thread}")
+    except Exception as e:  # noqa: BLE001
+        # e.g. every narrator voice failed 3 times. Finished work is checkpointed.
+        print(f"\n❌ Stopped: {type(e).__name__}: {str(e)[:200]}")
+        print(f"   Finished steps are saved. Fix the problem, then resume with: python main.py --thread {args.thread}")
     finally:
         checkpointer.conn.close()
 

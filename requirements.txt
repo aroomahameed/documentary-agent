@@ -8,7 +8,7 @@ pytest
 langchain-anthropic
 langgraph-checkpoint-sqlite
 requests
-# edge-tts                      # Stage 5
+edge-tts                      # Stage 5
 # moviepy                       # Stage 6
 # streamlit                     # Stage 7
 # langchain-mcp-adapters mcp    # Stage 8
