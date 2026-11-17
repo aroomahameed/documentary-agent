@@ -4,6 +4,8 @@ Run the documentary agent from the command line.
     python main.py "History of Mughal architecture" --thread mughal-1
     python main.py --thread mughal-1      # resume a paused run
     python main.py --draw                 # print the graph as a Mermaid diagram
+
+Set VIDEO_HEIGHT=480 in .env for fast preview renders while developing.
 """
 
 import argparse
@@ -86,6 +88,11 @@ def print_update(update: dict) -> None:
                 print(f"      ⚠ {problem}")
         elif node == "collect_scenes":
             print(f"📦 Manifest: {data['manifest_path']}")
+        elif node == "quality_check":
+            n = len(data["quality_issues"])
+            print("🔍 Quality check: " + (f"{n} issue(s)" if n else "all files OK"))
+        elif node == "render_video":
+            print(f"🎬 Video rendered: {data['video_path']}")
 
 
 def ask_human(script) -> dict:
@@ -99,6 +106,50 @@ def ask_human(script) -> dict:
     if answer == "":
         return {"action": "approve"}
     return {"action": "revise", "feedback": answer}
+
+
+def ask_production(values: dict, review: dict) -> dict:
+    """Show what was produced and collect the director's decision."""
+    print("\n" + "=" * 70)
+    print(f"🎞  Production review: {review['media_dir']}")
+    for p in values.get("produced_scenes", []):
+        kinds = ", ".join(s.kind for s in p.shots)
+        print(f"   scene {p.scene_number}: {p.duration_sec:.0f}s, {len(p.shots)} shot(s): {kinds}")
+    if review["issues"]:
+        print("\n⚠  Quality check:")
+        for issue in review["issues"]:
+            print(f"   - {issue}")
+    else:
+        print("\n✓  Quality check: all files OK")
+    print("=" * 70)
+    print("Open the folder above and look at the images first. Then:")
+    print("   Enter              -> render the video")
+    print("   redo 3: <notes>    -> re-produce scene 3 with your notes")
+    print("                         (several: redo 1: use a map; 4: more paintings)")
+    print("   stop               -> keep the media, don't render")
+    answer = input("> ").strip()
+
+    if answer == "":
+        return {"action": "render"}
+    if answer.lower() == "stop":
+        return {"action": "stop"}
+    scenes = {}
+    if answer.lower().startswith("redo"):
+        for part in answer[4:].split(";"):
+            number, _, note = part.partition(":")
+            if number.strip().isdigit():
+                scenes[int(number.strip())] = note.strip()
+    if not scenes:
+        print("   (didn't understand that, asking again)")
+    return {"action": "redo", "scenes": scenes}      # empty -> the graph simply asks again
+
+
+def answer_interrupt(snapshot) -> Command:
+    """The graph can wait at two different reviews: check which one, ask the right question."""
+    review = snapshot.interrupts[0].value
+    if review.get("type") == "production_review":
+        return Command(resume=ask_production(snapshot.values, review))
+    return Command(resume=ask_human(snapshot.values["script"]))
 
 
 def main() -> None:
@@ -152,7 +203,7 @@ def main() -> None:
         elif snapshot.interrupts:
             # Paused at human review: ask again
             print(f"⏯  Resuming thread '{args.thread}' (waiting for your review)")
-            next_input = Command(resume=ask_human(snapshot.values["script"]))
+            next_input = answer_interrupt(snapshot)
         elif snapshot.next:
             # Stopped mid-run (crash, Ctrl+C, network error): just continue.
             # Work that already finished (e.g. scenes already produced) is NOT redone.
@@ -175,7 +226,7 @@ def main() -> None:
             snapshot = graph.get_state(config)
             if not snapshot.interrupts:  # not waiting for a human: the graph reached END
                 break
-            next_input = Command(resume=ask_human(snapshot.values["script"]))
+            next_input = answer_interrupt(snapshot)
 
         script = snapshot.values["script"]
         folder = f"{slugify(snapshot.values['topic'])}-{args.thread}" + ("-fork" if args.fork else "")
@@ -184,6 +235,8 @@ def main() -> None:
         print(f"\n✅ Script saved to {out_dir}/script.md")
         if snapshot.values.get("manifest_path"):
             print(f"✅ Media and manifest in {Path(snapshot.values['manifest_path']).parent}")
+        if snapshot.values.get("video_path"):
+            print(f"✅ Video: {snapshot.values['video_path']}")
     except KeyboardInterrupt:
         print(f"\n⏸  Stopped. Everything is saved. Resume with: python main.py --thread {args.thread}")
     except Exception as e:  # noqa: BLE001
