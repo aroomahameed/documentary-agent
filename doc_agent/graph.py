@@ -8,7 +8,10 @@ Main graph (Stages 1-4):
     human_review -(feedback)-> script_writer                  (revision loop)
     human_review -(approve)-> start_production                (pick folder + narrator)
     start_production -(Send x scenes)-> scene_producer        (SUBGRAPH, in parallel)
-    scene_producer -> collect_scenes -> END                   (manifest for Stage 5)
+    scene_producer -> collect_scenes -> quality_check -> production_review
+    production_review -(redo, Send)-> scene_producer          (only the chosen scenes)
+    production_review -(render)-> render_video -> END
+    production_review -(stop)-> END
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -20,6 +23,9 @@ from .nodes import (
     fact_check,
     human_review,
     plan_research,
+    production_review,
+    quality_check,
+    render_documentary,
     research_subtopic,
     route_after_fact_check,
     start_production,
@@ -40,6 +46,9 @@ def build_graph(checkpointer=None):
     builder.add_node("start_production", start_production)
     builder.add_node("scene_producer", build_scene_graph())   # a compiled SUBGRAPH as a node
     builder.add_node("collect_scenes", collect_scenes)
+    builder.add_node("quality_check", quality_check)
+    builder.add_node("production_review", production_review)
+    builder.add_node("render_video", render_documentary)
 
     builder.add_edge(START, "planner")
     builder.add_conditional_edges("planner", dispatch_research, ["researcher"])
@@ -51,7 +60,10 @@ def build_graph(checkpointer=None):
     # human_review -> start_production happens via Command(goto=...) on approval.
     builder.add_conditional_edges("start_production", dispatch_scenes, ["scene_producer"])
     builder.add_edge("scene_producer", "collect_scenes")      # fan-in: waits for every scene
-    builder.add_edge("collect_scenes", END)
+    builder.add_edge("collect_scenes", "quality_check")
+    builder.add_edge("quality_check", "production_review")
+    # production_review routes itself with Command: render_video, scene_producer (redo) or END
+    builder.add_edge("render_video", END)
     # No edges OUT of human_review: it returns Command(goto=...) itself.
     # No script_writer -> END edge either, or the graph would finish without asking you.
 

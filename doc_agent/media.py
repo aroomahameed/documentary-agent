@@ -84,29 +84,12 @@ def _license_name(r: dict) -> str:
     return f"CC {lic} {r.get('license_version') or ''}".strip()
 
 
-def search_photos(query: str, n: int = 5, kind: str = "photo") -> list[dict]:
-    """
-    Search Openverse (openly licensed images from Flickr, museums and many other sources).
-    Returns up to n images as {id, alt, url, thumb, author, license, page}.
-
-    kind="photo"   -> wide photos (places and buildings today)
-    kind="artwork" -> paintings, miniatures, drawings, maps (any shape: many old
-                      paintings are portrait; Stage 5 will fit them onto the 16:9 frame)
-
-    Short queries work best ("Badshahi Mosque", not a whole sentence).
-    Results are cached on disk, so repeating a search costs no API request.
-    Raises RateLimited when Openverse refuses because of too many requests.
-    """
-    key = hashlib.sha1(f"{kind}|{n}|{query.strip().lower()}".encode()).hexdigest()[:16]
+def _openverse(params: dict) -> list[dict]:
+    """One Openverse request (cached on disk, throttled). Raises RateLimited on 429."""
+    key = hashlib.sha1(json.dumps(params, sort_keys=True).lower().encode()).hexdigest()[:16]
     cache_file = CACHE_DIR / f"{key}.json"
     if cache_file.exists():
         return json.loads(cache_file.read_text(encoding="utf-8"))
-
-    params = {"q": query, "page_size": n, "excluded_source": EXCLUDED_SOURCES}
-    if kind == "artwork":
-        params["category"] = "digitized_artwork,illustration"
-    else:
-        params["aspect_ratio"] = "wide"          # landscape photos only, for 16:9 video
 
     _wait_for_turn()
     resp = requests.get(OPENVERSE_API, headers=HEADERS, timeout=20, params=params)
@@ -116,12 +99,13 @@ def search_photos(query: str, n: int = 5, kind: str = "photo") -> list[dict]:
     photos = [
         {
             "id": r.get("id"),
-            "alt": r.get("title") or query,      # the photo's title on its original site
-            "url": r.get("url"),                 # full-size image on the original site
-            "thumb": r.get("thumbnail"),         # smaller copy served by Openverse itself
+            "alt": r.get("title") or params["q"],   # the image's title on its original site
+            "url": r.get("url"),                    # full-size image on the original site
+            "thumb": r.get("thumbnail"),            # smaller copy served by Openverse itself
             "author": r.get("creator") or "Unknown",
             "license": _license_name(r),
-            "page": r.get("foreign_landing_url") or "",   # original photo page, for credits
+            "page": r.get("foreign_landing_url") or "",   # original page, for credits
+            "source": r.get("source") or "",
         }
         for r in resp.json().get("results", [])
         if r.get("url")
@@ -130,6 +114,35 @@ def search_photos(query: str, n: int = 5, kind: str = "photo") -> list[dict]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(json.dumps(photos), encoding="utf-8")
     return photos
+
+
+def search_photos(query: str, n: int = 5, kind: str = "photo") -> list[dict]:
+    """
+    Search Openverse (openly licensed images from Flickr, museums, Wikimedia, ...).
+    Returns up to n images as {id, alt, url, thumb, author, license, page, source}.
+
+    First a STRICT search:
+      kind="photo"   -> only wide images (they fill the 16:9 frame)
+      kind="artwork" -> only Openverse's art categories
+    If that finds fewer than 2 images, a RELAXED search without the filter adds more.
+    Why: many museum and Wikimedia paintings have no category set, and most
+    portraits are tall, so strict filters alone would hide exactly the historical
+    art we want. The renderer can show any shape (tall images go on a blurred background).
+
+    Short queries work best ("Badshahi Mosque", not a whole sentence).
+    Raises RateLimited when Openverse refuses because of too many requests.
+    """
+    base = {"q": query, "page_size": n}
+    if EXCLUDED_SOURCES:
+        base["excluded_source"] = EXCLUDED_SOURCES
+    strict = dict(base, **({"category": "digitized_artwork,illustration"} if kind == "artwork"
+                           else {"aspect_ratio": "wide"}))
+
+    results = _openverse(strict)
+    if len(results) < 2:
+        seen = {r["url"] for r in results}
+        results += [r for r in _openverse(base) if r["url"] not in seen]
+    return results[:n]
 
 
 def download(url: str, path: Path, fallback_url: str | None = None) -> Path:

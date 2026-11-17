@@ -14,6 +14,12 @@ Command(goto, update): a node updates the state and chooses the next node in one
 get_state().next: empty means finished; not empty means paused (or unfinished).
 Graph input: a dict starts a run, Command(resume=) answers a pause, None continues.
 update_state(old_config, ...): creates a branch from any past checkpoint; that’s time travel.
+stage 4
+Parallel workers can’t follow global rules.
+A vision check catches what titles can’t.
+A RetryPolicy only retries network-type errors by default.
+Rate limits look like “no results” unless you report the real reason.
+LLM output sometimes arrives as JSON text instead of a list.
 
 ## Stage 1: Research → Script
 

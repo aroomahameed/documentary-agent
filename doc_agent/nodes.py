@@ -11,6 +11,7 @@ from .state import DocState, FactCheckReport, ResearchNote, ResearchPlan, Resear
 from .tools import search_web, web_search, wikipedia_lookup
 from .production import choose_voice
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,9 @@ from typing import Literal
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command, Send, interrupt
+from PIL import Image
+
+from .video import render_video as render_mp4
 
 WORDS_PER_MINUTE = 140
 
@@ -197,7 +201,8 @@ def format_notes(notes: list[ResearchNote]) -> str:
 def human_review(state: DocState) -> Command[Literal["script_writer", "start_production"]]:
     # interrupt() PAUSES the graph here and saves everything to the checkpointer.
     # Whatever you pass to Command(resume=...) later becomes the return value.
-    decision = interrupt({"question": "Approve the script, or give feedback to revise it."})
+    decision = interrupt({"type": "script_review",
+                          "question": "Approve the script, or give feedback to revise it."})
 
     if decision["action"] == "approve":
         return Command(goto="start_production")      # Stage 4: approved -> make the media
@@ -250,3 +255,75 @@ def collect_scenes(state: DocState) -> dict:
     path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     (media_dir / "script.json").write_text(state["script"].model_dump_json(indent=2), encoding="utf-8")
     return {"manifest_path": str(path)}
+
+# --- Stage 5: quality check, production review, render ------------------------
+
+VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "1080"))   # 480 = fast preview renders
+
+
+def quality_check(state: DocState) -> dict:
+    """
+    CODE checks every produced file before a human looks at the scenes.
+    No LLM: whether a file exists or an image opens is a fact, not a judgement.
+    """
+    issues = []
+    produced = {p.scene_number: p for p in state.get("produced_scenes", [])}
+    for scene in state["script"].scenes:
+        n = scene.scene_number
+        p = produced.get(n)
+        if p is None:
+            issues.append(f"scene {n}: missing (production failed)")
+            continue
+        audio = Path(p.audio_path)
+        if not audio.exists() or audio.stat().st_size == 0 or p.duration_sec <= 0:
+            issues.append(f"scene {n}: narration audio missing or empty")
+        for i, shot in enumerate(p.shots, 1):
+            try:
+                with Image.open(shot.image_path) as img:
+                    img.verify()                       # catches missing and corrupt files
+            except Exception:  # noqa: BLE001
+                issues.append(f"scene {n} shot {i}: image missing or unreadable")
+        if all(shot.kind == "title_card" for shot in p.shots):
+            issues.append(f"scene {n}: no images found, only a title card")
+        elif len(p.shots) == 1 and p.duration_sec > 15:
+            issues.append(f"scene {n}: a single image for {p.duration_sec:.0f}s")
+    return {"quality_issues": issues}
+
+
+def production_review(state: DocState) -> Command[Literal["render_video", "scene_producer",
+                                                          "production_review", "__end__"]]:
+    """
+    Second human checkpoint: look at the produced scenes, then
+      {"action": "render"}                          -> render the video
+      {"action": "redo", "scenes": {3: "notes"}}    -> re-produce ONLY those scenes
+      {"action": "stop"}                            -> keep the media, don't render
+    """
+    decision = interrupt({"type": "production_review",
+                          "issues": state.get("quality_issues", []),
+                          "media_dir": state["media_dir"]})
+
+    action = decision.get("action")
+    if action == "render":
+        return Command(goto="render_video")
+    if action == "stop":
+        return Command(goto="__end__")
+
+    # Redo: never trust scene numbers from outside; keep only ones that exist
+    scenes = {s.scene_number: s for s in state["script"].scenes}
+    redo = {int(n): note for n, note in decision.get("scenes", {}).items() if int(n) in scenes}
+    if not redo:
+        return Command(goto="production_review")     # nothing valid to redo: ask again
+
+    # Command can also fan out: one Send per scene to redo, straight into the subgraph.
+    # The merge_scenes reducer then REPLACES those scenes and keeps all the others.
+    return Command(goto=[
+        Send("scene_producer", {"scene": scenes[n], "media_dir": state["media_dir"],
+                                "voice": state["voice"], "notes": note})
+        for n, note in sorted(redo.items())
+    ])
+
+
+def render_documentary(state: DocState) -> dict:
+    """Fixed workflow step: manifest -> MP4 (see video.py). Slow, but checkpointed before it starts."""
+    path = render_mp4(Path(state["manifest_path"]), height=VIDEO_HEIGHT)
+    return {"video_path": str(path)}

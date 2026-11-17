@@ -97,6 +97,7 @@ class SceneState(TypedDict, total=False):
     scene: Scene
     media_dir: str
     voice: str              # chosen ONCE for the whole documentary (see choose_voice)
+    notes: str              # director's notes when a scene is redone (production review)
     # filled by the parallel branches
     shots: list[Shot]
     audio_path: str
@@ -159,10 +160,12 @@ def too_similar(title: str, used_titles: list[str], threshold: float = 0.5) -> b
     return False
 
 
-def verify_image(path: Path, idea: ShotIdea) -> tuple[bool, str]:
+def verify_image(path: Path, idea: ShotIdea, title: str = "") -> tuple[bool, str]:
     """
     VISION CHECK: show the downloaded image to the LLM and ask if it really fits.
     The picker only reads titles; a photo titled "mumtaz mahal" can show anyone.
+    The checker gets the title TOO: nobody can recognise a 400-year-old painting
+    of Shah Jahan from the picture alone, but its museum title says who it is.
     Returns (matches, what the image actually shows).
     """
     if not VERIFY_IMAGES:
@@ -170,7 +173,8 @@ def verify_image(path: Path, idea: ShotIdea) -> tuple[bool, str]:
     check = get_llm().with_structured_output(ImageCheck).invoke([
         SystemMessage(IMAGE_CHECK_PROMPT),
         HumanMessage(content=[
-            {"type": "text", "text": f"The shot should show ({idea.kind}): {idea.description}"},
+            {"type": "text", "text": f"The shot should show ({idea.kind}): {idea.description}\n"
+                                     f"The image's title at its source: {title or '(none)'}"},
             {"type": "image_url",
              "image_url": {"url": f"data:image/jpeg;base64,{image_preview_b64(path)}"}},
         ]),
@@ -239,7 +243,7 @@ def find_image(idea: ShotIdea, narration: str, fallback_queries: list[str],
 
         # c) look at it
         try:
-            matches, shows = verify_image(path, idea)
+            matches, shows = verify_image(path, idea, image["alt"])
         except Exception as e:  # noqa: BLE001  (checker unavailable: keep the image, but say so)
             matches, shows = True, f"not verified ({type(e).__name__})"
         if matches:
@@ -258,11 +262,14 @@ def find_visuals(state: SceneState) -> dict:
     media_dir = Path(state["media_dir"])
     n = shot_count(scene.narration)
 
-    # 1) LLM as picture editor: plan the shots
+    # 1) LLM as picture editor: plan the shots (following the director's notes on a redo)
+    request = (f"Narration: {scene.narration}\n"
+               f"Main visual idea from the script: {scene.visual_description}")
+    if state.get("notes"):
+        request += f"\n\nDirector's notes for this scene (follow them): {state['notes']}"
     plan = get_llm().with_structured_output(ShotPlan).invoke([
         SystemMessage(SHOT_PLAN_PROMPT.format(n=n)),
-        HumanMessage(f"Narration: {scene.narration}\n"
-                     f"Main visual idea from the script: {scene.visual_description}"),
+        HumanMessage(request),
     ])
 
     # 2) Fill each shot (code enforces the limit, "no repeats" and "no near-duplicates")

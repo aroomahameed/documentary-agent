@@ -64,6 +64,11 @@ Also give 1-2 broad fallback_queries for the scene's overall subject
 
 IMAGE_PICK_PROMPT = """You pick the best image for one shot of a documentary.
 You get the narration, what the shot should show, and numbered image titles.
+Judge ONLY the main subject: which person, place, object or event it shows.
+IGNORE time of day, weather, lighting, season, camera angle and composition details
+in the description ("at golden hour", "reflected in the river", "aerial"): a clear
+daytime photo of the right building is a match.
+
 Choose the closest reasonable match: it doesn't have to be perfect.
 Answer 0 only if every image clearly shows a different subject
 (e.g. the shot is about a mosque and all images show beaches)."""
@@ -78,9 +83,20 @@ Otherwise use the default. Copy the voice name exactly."""
 IMAGE_CHECK_PROMPT = """You check whether an image fits one shot of a documentary.
 Describe what the image actually shows, then decide if it matches.
 
-Be STRICT about people: a portrait must clearly be that specific person, e.g. a
-historical painting or statue labelled or recognisable as them. A random modern
-person, a different historical figure, or a group where the person isn't clear
-does NOT match.
-For places, buildings, objects and events, showing the right subject is enough,
-even from a different angle than described."""
+Judge ONLY the main subject: which person, place, object or event it shows.
+IGNORE time of day, weather, lighting, season, camera angle and composition details
+in the description ("at golden hour", "reflected in the river", "aerial"): a clear
+daytime photo of the right building is a match.
+
+You also get the image's TITLE from its source (museum, archive, photographer).
+Use the picture and the title together.
+
+PEOPLE from history: they can't be recognised from the picture alone, so:
+- MATCH if the title names that person AND the picture is a historical artwork
+  of a person (painting, miniature, drawing, engraving, statue, coin, manuscript page).
+- NO MATCH if the picture is a modern photo of a person (even when the title uses
+  the name), if the title names someone else, or if it shows no person at all.
+
+PLACES, buildings, objects and events: showing the right subject is enough,
+even from a different angle than described. A historical painting of the place
+also matches."""

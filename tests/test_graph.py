@@ -8,7 +8,10 @@ interrupts, time travel) deterministically.
     python -m pytest -q
 """
 
+from pathlib import Path
+
 import pytest
+from PIL import Image
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -56,6 +59,9 @@ class Fake:
         self.voice_choice = "en-GB-RyanNeural"
         self.tts_calls: list[str] = []      # voices used, one per narrated scene
         self.tts_fails = False
+        self.plan_requests: list[str] = []  # what the shot planner was asked (per scene)
+        self.renders: list[str] = []        # manifests passed to the renderer
+        self.broken_image = None            # file name to corrupt, for quality-check tests
 
     # --- LLM with structured output ---
     def with_structured_output(self, schema):
@@ -88,6 +94,7 @@ class Fake:
                 if schema is production.VoiceChoice:
                     return production.VoiceChoice(voice=fake.voice_choice, reason="test")
                 if schema is production.ShotPlan:
+                    fake.plan_requests.append(text)
                     return production.ShotPlan(
                         shots=[production.ShotIdea(description="a fort", kind="photo", queries=["fort"])],
                         fallback_queries=["castle"],
@@ -127,11 +134,20 @@ class Fake:
         return [{"alt": f"{query} image", "url": f"https://img/{query}", "thumb": "t",
                  "author": "Tester", "license": "CC0", "page": "https://page"}]
 
-    @staticmethod
-    def download(url, path, fallback_url=None):
+    def download(self, url, path, fallback_url=None):
+        """A real (tiny) JPEG, so the quality check can open it."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"fake image")
+        if self.broken_image and path.name == self.broken_image:
+            path.write_bytes(b"not an image")
+        else:
+            Image.new("RGB", (16, 9), (120, 80, 40)).save(path, "JPEG")
         return path
+
+    def render(self, manifest_path, height=1080):
+        self.renders.append(str(manifest_path))
+        out = Path(manifest_path).parent / "documentary.mp4"
+        out.write_bytes(b"fake mp4")
+        return out
 
     def text_to_speech(self, text, path, voice=None):
         if self.tts_fails:
@@ -156,6 +172,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(production, "image_preview_b64", lambda path: "ZmFrZQ==")
     monkeypatch.setattr(production, "text_to_speech", f.text_to_speech)
     monkeypatch.setattr(production, "audio_duration", lambda path: 3.0)
+    monkeypatch.setattr(nodes, "render_mp4", f.render)
     return f
 
 
@@ -277,7 +294,7 @@ def test_pauses_for_review_then_approve_ends(fake, graph):
     assert snap.next == ("human_review",)               # paused, waiting for a human
 
     snap = resume(graph, {"action": "approve"})
-    assert snap.next == ()                              # finished
+    assert snap.next == ("production_review",)          # Stage 5: next stop is the 2nd review
     assert snap.values["script"].scenes[0].narration == "Draft 1."
 
 
@@ -296,7 +313,7 @@ def test_threads_are_independent(fake, graph):
     resume(graph, {"action": "approve"}, thread="a")
     snap_b = start(graph, thread="b")
 
-    assert graph.get_state(config("a")).next == ()
+    assert graph.get_state(config("a")).next == ("production_review",)
     assert snap_b.next == ("human_review",)
 
 
@@ -325,7 +342,7 @@ def test_approval_produces_every_scene(fake, graph):
     start(graph)
     snap = resume(graph, {"action": "approve"})
 
-    assert snap.next == ()                                      # ran to the end
+    assert snap.next == ("production_review",)                  # produced, waiting for review
     produced = snap.values["produced_scenes"]
     assert [p.scene_number for p in produced] == [1, 2]         # all scenes, in order
     assert all(p.shots and p.audio_path for p in produced)
@@ -382,5 +399,79 @@ def test_failed_production_can_be_resumed(fake, graph):
     fake.tts_fails = False                      # "fix the problem" ...
     graph.invoke(None, config())                # ... and continue with None
     snap = graph.get_state(config())
-    assert snap.next == ()
+    assert snap.next == ("production_review",)
     assert len(snap.values["produced_scenes"]) == 2
+
+# ---------------------------------------------------------------------------
+# Stage 5: quality check, production review, render
+# ---------------------------------------------------------------------------
+
+def produced(graph):
+    """Run to the production review: start, approve the script."""
+    start(graph)
+    return resume(graph, {"action": "approve"})
+
+
+def test_production_review_shows_quality_check(fake, graph):
+    snap = produced(graph)
+
+    review = snap.interrupts[0].value
+    assert review["type"] == "production_review"
+    assert review["issues"] == []                       # all fake files are fine
+    assert fake.renders == []                           # nothing rendered before approval
+
+
+def test_quality_check_catches_broken_image(fake, graph):
+    fake.broken_image = "scene_02_shot_1.jpg"
+    snap = produced(graph)
+
+    assert snap.values["quality_issues"] == ["scene 2 shot 1: image missing or unreadable"]
+
+
+def test_render_produces_video(fake, graph):
+    produced(graph)
+    snap = resume(graph, {"action": "render"})
+
+    assert snap.next == ()                              # finished
+    assert snap.values["video_path"].endswith("documentary.mp4")
+    assert fake.renders == [snap.values["manifest_path"]]
+
+
+def test_stop_keeps_media_without_rendering(fake, graph):
+    produced(graph)
+    snap = resume(graph, {"action": "stop"})
+
+    assert snap.next == ()
+    assert fake.renders == []
+    assert "video_path" not in snap.values
+
+
+def test_redo_reproduces_only_that_scene_with_notes(fake, graph):
+    produced(graph)
+    tts_before = len(fake.tts_calls)
+
+    snap = resume(graph, {"action": "redo", "scenes": {2: "use a map of the empire"}})
+
+    assert len(fake.tts_calls) == tts_before + 1        # ONLY scene 2 was produced again
+    assert "use a map of the empire" in fake.plan_requests[-1]
+    assert [p.scene_number for p in snap.values["produced_scenes"]] == [1, 2]   # replaced, not added
+    assert snap.next == ("production_review",)          # and we're asked again
+
+
+def test_redo_with_invalid_scene_asks_again(fake, graph):
+    produced(graph)
+    tts_before = len(fake.tts_calls)
+
+    snap = resume(graph, {"action": "redo", "scenes": {99: "no such scene"}})
+
+    assert len(fake.tts_calls) == tts_before            # nothing re-produced
+    assert snap.next == ("production_review",)
+
+
+def test_full_run_redo_then_render(fake, graph):
+    produced(graph)
+    resume(graph, {"action": "redo", "scenes": {1: "more paintings"}})
+    snap = resume(graph, {"action": "render"})
+
+    assert snap.next == ()
+    assert len(fake.renders) == 1                       # rendered once, after the redo

@@ -151,7 +151,9 @@ class DocState(TypedDict, total=False):
     produced_scenes: Annotated[list[ProducedScene], merge_scenes]   # filled in parallel
     manifest_path: str                 # summary of everything produced
 
-    # video_path: str                  # Stage 5
+    # --- video (Stage 5) ---
+    quality_issues: list[str]          # found by code in quality_check, shown at production review
+    video_path: str
 
 
 class ResearchTask(TypedDict):
