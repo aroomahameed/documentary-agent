@@ -138,7 +138,7 @@ LEARNINGS.md    # what I learned at each stage
 - [x] **Stage 2: Fact-checking loop.** A ReAct agent with tools, cycles with limits, a custom reducer
 - [x] **Stage 3: Human review and persistence.** `interrupt`, checkpointer, resume, time travel
 - [x] **Stage 4: Scene production.** A subgraph per scene: find visuals, generate voiceover (`edge-tts`)
-- [ ] **Stage 5: Assembly.** Quality check, preview approval, render the video (`moviepy`)
+- [x] **Stage 5: Assembly.** Quality check, preview approval, render the video (`moviepy`)
 - [ ] **Stage 6: UI.** Live progress streaming in a web interface
 - [ ] **Stage 7: Multi-agent and styles.** A supervisor, style presets, English + Urdu narration
 - [ ] **Stage 8: MCP.** Expose the tools as an MCP server

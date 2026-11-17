@@ -143,8 +143,11 @@ class Fake:
             Image.new("RGB", (16, 9), (120, 80, 40)).save(path, "JPEG")
         return path
 
-    def render(self, manifest_path, height=1080):
+    def render(self, manifest_path, height=1080, progress=None):
         self.renders.append(str(manifest_path))
+        if progress:
+            for pct in (0, 50, 100):
+                progress(pct)
         out = Path(manifest_path).parent / "documentary.mp4"
         out.write_bytes(b"fake mp4")
         return out
@@ -475,3 +478,27 @@ def test_full_run_redo_then_render(fake, graph):
 
     assert snap.next == ()
     assert len(fake.renders) == 1                       # rendered once, after the redo
+
+
+
+# ---------------------------------------------------------------------------
+# Stage 6: live progress (custom streaming)
+# ---------------------------------------------------------------------------
+
+def test_progress_messages_stream_from_nodes_and_subgraph(fake, graph):
+    produced(graph)
+    events = list(graph.stream(Command(resume={"action": "render"}), config(),
+                               stream_mode=["updates", "custom"], subgraphs=True))
+    render_msgs = [c["msg"] for ns, mode, c in events if mode == "custom"]
+    assert "rendering: 100%" in render_msgs
+
+    # progress from INSIDE the scene subgraph arrives with a scene number and a namespace
+    fork_events = []
+    start(graph, thread="p")
+    for ns, mode, chunk in graph.stream(Command(resume={"action": "approve"}), config("p"),
+                                        stream_mode=["updates", "custom"], subgraphs=True):
+        fork_events.append((ns, mode, chunk))
+    scene_msgs = [(ns, c) for ns, mode, c in fork_events if mode == "custom" and "scene" in c]
+    assert {c["scene"] for _, c in scene_msgs} == {1, 2}
+    assert all(ns for ns, _ in scene_msgs)                      # they come from a subgraph
+    assert any("Narrator" in c["msg"] for ns, mode, c in fork_events if mode == "custom")

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.config import get_stream_writer
 from langgraph.types import Command, Send, interrupt
 from PIL import Image
 
@@ -141,6 +142,7 @@ def write_script(state: DocState) -> dict:
 
 def fact_check(state: DocState) -> dict:
     rounds = state.get("research_rounds", 0) + 1
+    get_stream_writer()({"msg": f"fact-checking (round {rounds}): the agent is calling its tools..."})
 
     # Round 2+: only re-check the subtopics that were just re-researched.
     notes = state["research"]
@@ -227,7 +229,7 @@ def start_production(state: DocState, config: RunnableConfig) -> dict:
     media_dir = Path("output") / f"{_slug(state['topic'])}-{thread}" / f"media-{stamp}"
 
     voice, reason = choose_voice(f"{state['topic']}. {state['script'].title}")
-    print(f"🎙  Narrator: {voice} ({reason})")
+    get_stream_writer()({"msg": f"🎙  Narrator: {voice} ({reason})"})
     return {"media_dir": str(media_dir), "voice": voice}
 
 
@@ -325,5 +327,8 @@ def production_review(state: DocState) -> Command[Literal["render_video", "scene
 
 def render_documentary(state: DocState) -> dict:
     """Fixed workflow step: manifest -> MP4 (see video.py). Slow, but checkpointed before it starts."""
-    path = render_mp4(Path(state["manifest_path"]), height=VIDEO_HEIGHT)
+    writer = get_stream_writer()
+    writer({"msg": f"rendering {VIDEO_HEIGHT}p video..."})
+    path = render_mp4(Path(state["manifest_path"]), height=VIDEO_HEIGHT,
+                      progress=lambda pct: writer({"msg": f"rendering: {pct}%", "percent": pct}))
     return {"video_path": str(path)}

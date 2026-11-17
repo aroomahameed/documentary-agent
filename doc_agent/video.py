@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 from moviepy import AudioFileClip, VideoClip, concatenate_videoclips
+from proglog import ProgressBarLogger
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 ZOOM = 1.35            # stills are prepared this much bigger than the frame, for zooms and pans
@@ -222,6 +223,24 @@ def still_clip(stills: list[Image.Image], frame: tuple[int, int], duration: floa
     return VideoClip(frame_function=frame_at, duration=duration)
 
 
+class _PercentLogger(ProgressBarLogger):
+    """moviepy reports progress through a 'proglog' logger. This one turns the frame
+    counter into a callback(percent), called every 5%, e.g. to stream progress to a UI."""
+
+    def __init__(self, callback):
+        super().__init__()
+        self._callback = callback
+        self._last = -5
+
+    def bars_callback(self, bar, attr, value, old_value=None):
+        if bar == "frame_index" and attr == "index":
+            total = self.bars[bar].get("total") or 1
+            percent = int(100 * value / total)
+            if percent >= self._last + 5:
+                self._last = percent
+                self._callback(percent)
+
+
 # --- Assembly ---------------------------------------------------------------
 
 def _credit_lines(manifest: dict, max_len: int = 80) -> list[str]:
@@ -243,8 +262,12 @@ def _credit_lines(manifest: dict, max_len: int = 80) -> list[str]:
 
 
 def render_video(manifest_path: Path, out_path: Path | None = None,
-                 height: int = 1080, fps: int = 24, logger: str | None = "bar") -> Path:
-    """Render the whole documentary. Returns the path of the MP4."""
+                 height: int = 1080, fps: int = 24, logger: str | None = "bar",
+                 progress=None) -> Path:
+    """
+    Render the whole documentary. Returns the path of the MP4.
+    progress: optional callback(percent) for live progress (replaces the terminal bar).
+    """
     manifest_path = Path(manifest_path)
     manifest_dir = manifest_path.parent
     manifest = load_manifest(manifest_path)
@@ -285,7 +308,8 @@ def render_video(manifest_path: Path, out_path: Path | None = None,
     try:
         video.write_videofile(
             str(out_path), fps=fps, codec="libx264", audio_codec="aac",
-            preset="veryfast", threads=4, logger=logger,
+            preset="veryfast", threads=4,
+            logger=_PercentLogger(progress) if progress else logger,
             temp_audiofile_path=str(manifest_dir),     # temp file next to the video, not in cwd
         )
     finally:

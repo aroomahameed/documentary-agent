@@ -220,8 +220,16 @@ def main() -> None:
 
         # Run -> pause at review -> ask human -> resume -> ... until the graph ends.
         while True:
-            for update in graph.stream(next_input, config, stream_mode="updates"):
-                print_update(update)
+            # Two stream modes at once, including events from inside the scene subgraph:
+            #   "updates" = a node finished (we print those of the MAIN graph, namespace ())
+            #   "custom"  = progress messages nodes send with get_stream_writer()
+            for namespace, mode, chunk in graph.stream(
+                    next_input, config, stream_mode=["updates", "custom"], subgraphs=True):
+                if mode == "custom":
+                    prefix = f"[scene {chunk['scene']}] " if "scene" in chunk else ""
+                    print(f"      · {prefix}{chunk['msg']}")
+                elif not namespace:
+                    print_update(chunk)
 
             snapshot = graph.get_state(config)
             if not snapshot.interrupts:  # not waiting for a human: the graph reached END

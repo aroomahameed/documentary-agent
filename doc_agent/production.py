@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 from pydantic import Field
@@ -113,6 +114,14 @@ class SceneOutput(TypedDict):
 
 
 # --- Helpers ------------------------------------------------------------------
+
+def progress(scene_number: int, message: str) -> None:
+    """
+    Send a live progress message to whoever is streaming the graph
+    (stream_mode="custom"). Outside a stream, e.g. produce_scenes.py, it goes nowhere.
+    """
+    get_stream_writer()({"scene": scene_number, "msg": message})
+
 
 def choose_voice(topic: str) -> tuple[str, str]:
     """
@@ -274,16 +283,20 @@ def find_visuals(state: SceneState) -> dict:
 
     # 2) Fill each shot (code enforces the limit, "no repeats" and "no near-duplicates")
     shots, problems, used_urls, used_titles = [], [], set(), []
+    progress(scene.scene_number, f"planned {len(plan.shots[:MAX_SHOTS])} shot(s)")
     for i, idea in enumerate(plan.shots[:MAX_SHOTS], 1):
+        progress(scene.scene_number, f"shot {i}: looking for {idea.kind}: {idea.description[:60]}")
         path = media_dir / f"scene_{scene.scene_number:02d}_shot_{len(shots) + 1}.jpg"
         image, kind, reasons = find_image(idea, scene.narration, plan.fallback_queries,
                                           used_urls, used_titles, path)
         if image is None:
+            progress(scene.scene_number, f"shot {i}: nothing usable found")
             problems.append(f"scene {scene.scene_number} shot {i} ('{idea.description[:50]}'): "
                             + "; ".join(reasons))
             continue
         used_urls.add(image["url"])
         used_titles.append(image["alt"])
+        progress(scene.scene_number, f"shot {i}: ✓ {image['alt'][:60]}")
         shots.append(Shot(
             image_path=str(path), kind=kind, description=idea.description,
             credit=f"\"{image['alt']}\" by {image['author']} ({image['license']}) {image['page']}",
@@ -310,6 +323,7 @@ def voiceover(state: SceneState) -> dict:
     chosen = state.get("voice") or DEFAULT_VOICE
     order = [chosen] + [v for v in VOICES if v != chosen]
 
+    progress(scene.scene_number, f"recording narration ({chosen})")
     errors = []
     for voice in order:
         try:
