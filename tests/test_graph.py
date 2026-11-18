@@ -502,3 +502,32 @@ def test_progress_messages_stream_from_nodes_and_subgraph(fake, graph):
     assert {c["scene"] for _, c in scene_msgs} == {1, 2}
     assert all(ns for ns, _ in scene_msgs)                      # they come from a subgraph
     assert any("Narrator" in c["msg"] for ns, mode, c in fork_events if mode == "custom")
+
+
+# ---------------------------------------------------------------------------
+# Downloads: only real images are saved
+# ---------------------------------------------------------------------------
+
+def test_download_rejects_html_and_uses_fallback(tmp_path, monkeypatch):
+    import io as _io
+    from unittest.mock import MagicMock
+
+    from doc_agent import media
+
+    buf = _io.BytesIO()
+    Image.new("RGB", (8, 8)).save(buf, "JPEG")
+    responses = {"https://original": b"<html>Access denied</html>", "https://thumb": buf.getvalue()}
+
+    def fake_get(url, headers=None, timeout=None):
+        r = MagicMock(content=responses[url], headers={"content-type": "x"})
+        r.raise_for_status = lambda: None
+        return r
+
+    monkeypatch.setattr(media.requests, "get", fake_get)
+    path = media.download("https://original", tmp_path / "a.jpg", fallback_url="https://thumb")
+    assert media.is_image(path)                         # the fallback image was saved
+
+    responses["https://thumb"] = b"<html>also not an image</html>"
+    with pytest.raises(ValueError):
+        media.download("https://original", tmp_path / "b.jpg", fallback_url="https://thumb")
+    assert not (tmp_path / "b.jpg").exists()            # nothing broken left on disk

@@ -145,18 +145,39 @@ def search_photos(query: str, n: int = 5, kind: str = "photo") -> list[dict]:
     return results[:n]
 
 
+def is_image(path) -> bool:
+    """True if the file exists and really is an image (not e.g. an HTML error page)."""
+    try:
+        with Image.open(path) as img:
+            img.verify()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _fetch_image(url: str) -> bytes:
+    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp.raise_for_status()
+    # A server can answer "200 OK" with an HTML error or login page instead of a picture
+    # (common behind VPNs and proxies). Only accept bytes that Pillow can open as an image.
+    if not is_image(io.BytesIO(resp.content)):
+        raise ValueError(f"not an image ({resp.headers.get('content-type', 'unknown type')})")
+    return resp.content
+
+
 def download(url: str, path: Path, fallback_url: str | None = None) -> Path:
-    """Download an image. If the original host fails, try the fallback (e.g. Openverse's thumbnail)."""
+    """
+    Download an image. If the original host fails OR sends something that isn't an
+    image, try the fallback (e.g. Openverse's own copy). Raises if both fail.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-    except requests.RequestException:
+        data = _fetch_image(url)
+    except Exception:  # noqa: BLE001
         if not fallback_url:
             raise
-        resp = requests.get(fallback_url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-    path.write_bytes(resp.content)
+        data = _fetch_image(fallback_url)
+    path.write_bytes(data)
     return path
 
 

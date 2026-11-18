@@ -62,6 +62,15 @@ def load_manifest(manifest_path: Path) -> dict:
 
 # --- Images -----------------------------------------------------------------
 
+def _opens(path: Path) -> bool:
+    try:
+        with Image.open(path) as img:
+            img.verify()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _font(size: int) -> ImageFont.FreeTypeFont:
     try:
         return ImageFont.truetype("arial.ttf", size)        # Windows
@@ -288,7 +297,12 @@ def render_video(manifest_path: Path, out_path: Path | None = None,
     for scene in manifest["scenes"]:
         audio = AudioFileClip(str(_find(scene["audio_path"], manifest_dir)))
         audios.append(audio)
-        prepared = [prepare_still(_find(s["image_path"], manifest_dir), frame) for s in scene["shots"]]
+        # Skip image files that can't be opened (the quality check reports them);
+        # if none are left, show the narration's scene number on a plain card instead.
+        paths = [_find(s["image_path"], manifest_dir) for s in scene["shots"]]
+        prepared = [prepare_still(p, frame) for p in paths if _opens(p)]
+        if not prepared:
+            prepared = [(text_card([f"Scene {scene['scene_number']}"], frame, height // 13), False)]
         stills, fitted = [p[0] for p in prepared], [p[1] for p in prepared]
         clip = still_clip(stills, frame, audio.duration + SCENE_PAD, fitted=fitted)
         clips.append(clip.with_audio(audio))

@@ -10,35 +10,16 @@ Set VIDEO_HEIGHT=480 in .env for fast preview renders while developing.
 
 import argparse
 import re
-import sqlite3
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer  # noqa: E402
-from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
-# The checkpointer saves state to disk after every node. Our state contains
-# Pydantic objects, and LangGraph only rebuilds types you explicitly allow
-# (a security measure: loading arbitrary classes from a file can be dangerous).
-SAFE_TYPES = [
-    ("doc_agent.state", "ResearchNote"),
-    ("doc_agent.state", "Fact"),
-    ("doc_agent.state", "Script"),
-    ("doc_agent.state", "Scene"),
-    ("doc_agent.state", "ProducedScene"),
-    ("doc_agent.state", "Shot"),
-]
-
-
-def make_checkpointer(path: str = "checkpoints.db") -> SqliteSaver:
-    conn = sqlite3.connect(path, check_same_thread=False)
-    return SqliteSaver(conn, serde=JsonPlusSerializer(allowed_msgpack_modules=SAFE_TYPES))
-
 from doc_agent.graph import build_graph  # noqa: E402
+from doc_agent.runs import fork_before_script, make_checkpointer  # noqa: E402
 
 
 def slugify(text: str) -> str:
@@ -187,18 +168,11 @@ def main() -> None:
         if args.fork:
             if not snapshot.values:
                 parser.error(f"thread '{args.thread}' doesn't exist yet")
-            # Find the ORIGINAL checkpoint just before the first script was written
-            # (history is newest-first, so search from the oldest end).
-            history = list(graph.get_state_history(config))
-            target = next((s for s in reversed(history) if s.next == ("script_writer",)), None)
-            if target is None:
+            # Time travel (see runs.fork_before_script): branch from just after research
+            if not fork_before_script(graph, config, args.fork):
                 print("No checkpoint before script_writer found in this thread.")
                 return
-            print(f"⏪ Rewinding to checkpoint {target.config['configurable']['checkpoint_id'][-8:]} "
-                  f"(research done, no script yet)")
-            # update_state on an OLD checkpoint creates a NEW branch from that point.
-            # The original timeline stays in history untouched.
-            graph.update_state(target.config, {"human_feedback": args.fork})
+            print("⏪ Rewound to just after research (no script yet), writing a new version")
             next_input = None  # None = "continue from the latest checkpoint" (our new fork)
         elif snapshot.interrupts:
             # Paused at human review: ask again

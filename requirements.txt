@@ -11,5 +11,5 @@ requests
 edge-tts                  
 moviepy   
 mutagen          
-# streamlit                     # Stage 7
+streamlit                  
 # langchain-mcp-adapters mcp    # Stage 8
