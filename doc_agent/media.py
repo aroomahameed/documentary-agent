@@ -42,6 +42,8 @@ VOICES = {
                         "history, nature, science.",
     "en-IN-PrabhatNeural": "Indian English male. Topics about South Asia "
                            "(India, Pakistan, Bangladesh, Sri Lanka, Nepal).",
+    "en-US-AvaMultilingualNeural": "Warm, friendly American female, multilingual. "
+                                   "Good for children's videos and light, upbeat styles.",
 }
 DEFAULT_VOICE = "en-US-AndrewMultilingualNeural"
 # Documentary delivery: a bit slower and deeper than the voices' chatty default.

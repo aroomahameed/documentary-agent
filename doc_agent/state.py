@@ -128,6 +128,7 @@ class DocState(TypedDict, total=False):
     # --- input ---
     topic: str
     target_minutes: int
+    style: str                         # Stage 7: "documentary", "kids" or "short" (see styles.py)
 
     # --- planner ---
     title: str

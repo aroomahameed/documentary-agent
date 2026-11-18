@@ -10,6 +10,7 @@ from .prompts import FACT_CHECKER_PROMPT, PLANNER_PROMPT, RESEARCHER_PROMPT, SCR
 from .state import DocState, FactCheckReport, ResearchNote, ResearchPlan, ResearchTask, Script
 from .tools import search_web, web_search, wikipedia_lookup
 from .production import choose_voice
+from .styles import get_style
 import json
 import os
 import re
@@ -29,13 +30,20 @@ WORDS_PER_MINUTE = 140
 
 # 1) Planner ---------------------------------------------------------------
 
+def target_minutes(state: DocState) -> int:
+    """Target length: some styles fix it (a short is always 1 minute)."""
+    return get_style(state.get("style")).fixed_minutes or state["target_minutes"]
+
+
 def plan_research(state: DocState) -> dict:
+    style = get_style(state.get("style"))
     planner = get_llm().with_structured_output(ResearchPlan)
     plan = planner.invoke(
         [
             SystemMessage(PLANNER_PROMPT),
             HumanMessage(
-                f"Topic: {state['topic']}\nTarget length: {state['target_minutes']} minute(s)"
+                f"Topic: {state['topic']}\nTarget length: {target_minutes(state)} minute(s)\n"
+                f"Style: {style.label}. {style.planner}"
             ),
         ]
     )
@@ -117,13 +125,15 @@ def write_script(state: DocState) -> dict:
     if issues:
         notes_text += ("\n\nThese claims were found WRONG. Do not use them; "
                        "use the corrections instead:\n" + "\n".join(f"- {i}" for i in issues))
-    minutes = state["target_minutes"]
+    style = get_style(state.get("style"))
+    minutes = target_minutes(state)              # the style may fix the length
     prompt = SCRIPT_WRITER_PROMPT.format(
         words=minutes * WORDS_PER_MINUTE,
         minutes=minutes,
         min_scenes=max(3, minutes * 2),
         max_scenes=max(5, minutes * 4),
     )
+    prompt += f"\n\nStyle ({style.label}): {style.writer}"
     writer = get_llm().with_structured_output(Script)
     messages = [
         SystemMessage(prompt),
@@ -228,7 +238,8 @@ def start_production(state: DocState, config: RunnableConfig) -> dict:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     media_dir = Path("output") / f"{_slug(state['topic'])}-{thread}" / f"media-{stamp}"
 
-    voice, reason = choose_voice(f"{state['topic']}. {state['script'].title}")
+    voice, reason = choose_voice(f"{state['topic']}. {state['script'].title}",
+                                 get_style(state.get("style")).voice_hint)
     get_stream_writer()({"msg": f"🎙  Narrator: {voice} ({reason})"})
     return {"media_dir": str(media_dir), "voice": voice}
 
@@ -236,7 +247,8 @@ def start_production(state: DocState, config: RunnableConfig) -> dict:
 def dispatch_scenes(state: DocState) -> list[Send]:
     """Fan-out again: one scene_producer SUBGRAPH run per scene, all in parallel."""
     return [
-        Send("scene_producer", {"scene": scene, "media_dir": state["media_dir"], "voice": state["voice"]})
+        Send("scene_producer", {"scene": scene, "media_dir": state["media_dir"],
+                                "voice": state["voice"], "style": state.get("style")})
         for scene in state["script"].scenes
     ]
 
@@ -249,6 +261,8 @@ def collect_scenes(state: DocState) -> dict:
     manifest = {
         "title": state["script"].title,
         "voice": state["voice"],
+        "style": state.get("style"),
+        "vertical": get_style(state.get("style")).vertical,
         "total_seconds": round(sum(s.duration_sec for s in scenes), 1),
         "scenes": [s.model_dump() for s in scenes],
         "credits": [shot.credit for s in scenes for shot in s.shots if shot.credit],
@@ -320,7 +334,7 @@ def production_review(state: DocState) -> Command[Literal["render_video", "scene
     # The merge_scenes reducer then REPLACES those scenes and keeps all the others.
     return Command(goto=[
         Send("scene_producer", {"scene": scenes[n], "media_dir": state["media_dir"],
-                                "voice": state["voice"], "notes": note})
+                                "voice": state["voice"], "style": state.get("style"), "notes": note})
         for n, note in sorted(redo.items())
     ])
 

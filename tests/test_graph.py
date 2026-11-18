@@ -59,6 +59,8 @@ class Fake:
         self.voice_choice = "en-GB-RyanNeural"
         self.tts_calls: list[str] = []      # voices used, one per narrated scene
         self.tts_fails = False
+        self.tts_style = None
+        self.planner_prompts: list[str] = []
         self.plan_requests: list[str] = []  # what the shot planner was asked (per scene)
         self.renders: list[str] = []        # manifests passed to the renderer
         self.broken_image = None            # file name to corrupt, for quality-check tests
@@ -72,6 +74,7 @@ class Fake:
                 text = "\n".join(m.content if isinstance(m.content, str) else str(m.content)
                                  for m in messages)
                 if schema is ResearchPlan:
+                    fake.planner_prompts.append(text)
                     return ResearchPlan(title="Test Doc", subtopics=SUBTOPICS)
                 if schema is ResearchNote:
                     fake.researcher_prompts.append(text)
@@ -152,10 +155,11 @@ class Fake:
         out.write_bytes(b"fake mp4")
         return out
 
-    def text_to_speech(self, text, path, voice=None):
+    def text_to_speech(self, text, path, voice=None, rate=None, pitch=None):
         if self.tts_fails:
             raise ConnectionError("TTS down")
         self.tts_calls.append(voice)
+        self.tts_style = (rate, pitch)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fake mp3")
         return path
@@ -189,9 +193,9 @@ def config(thread="t1"):
     return {"configurable": {"thread_id": thread}}
 
 
-def start(graph, thread="t1"):
+def start(graph, thread="t1", **extra):
     """Run a new thread until it pauses (or ends). Returns the latest snapshot."""
-    graph.invoke({"topic": "Mughal architecture", "target_minutes": 1}, config(thread))
+    graph.invoke({"topic": "Mughal architecture", "target_minutes": 1, **extra}, config(thread))
     return graph.get_state(config(thread))
 
 
@@ -531,3 +535,46 @@ def test_download_rejects_html_and_uses_fallback(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         media.download("https://original", tmp_path / "b.jpg", fallback_url="https://thumb")
     assert not (tmp_path / "b.jpg").exists()            # nothing broken left on disk
+
+
+# ---------------------------------------------------------------------------
+# Stage 7: style presets
+# ---------------------------------------------------------------------------
+
+def test_style_reaches_planner_writer_voice_and_video(fake, graph):
+    start(graph, style="kids")
+    snap = resume(graph, {"action": "approve"})
+
+    assert "Kids explainer" in fake.planner_prompts[-1]
+    assert "children aged 8-12" in fake.writer_prompts[-1]
+    assert fake.tts_style == ("-5%", "+0Hz")                   # kids: lighter delivery
+    import json
+    manifest = json.loads(Path(snap.values["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["style"] == "kids" and manifest["vertical"] is False
+
+
+def test_short_is_vertical_and_one_minute(fake, graph):
+    start(graph, style="short", target_minutes=4)              # the style overrides 4 minutes
+    snap = resume(graph, {"action": "approve"})
+
+    assert "Target length: 1 minute(s)" in fake.planner_prompts[-1]
+    import json
+    manifest = json.loads(Path(snap.values["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["vertical"] is True
+
+
+def test_old_runs_without_style_use_documentary(fake, graph):
+    start(graph)                                               # no style given
+    resume(graph, {"action": "approve"})
+
+    assert fake.tts_style == ("-15%", "-8Hz")
+
+
+def test_a_bug_in_voice_code_is_not_hidden_as_a_voice_failure(fake, graph, monkeypatch):
+    def broken_tts(text, path, voice=None):                    # wrong signature = a code bug
+        return path
+    monkeypatch.setattr(production, "text_to_speech", broken_tts)
+    start(graph)
+
+    with pytest.raises(TypeError):                             # fails at once, with the real error
+        graph.invoke(Command(resume={"action": "approve"}), config())

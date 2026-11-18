@@ -272,16 +272,20 @@ def _credit_lines(manifest: dict, max_len: int = 80) -> list[str]:
 
 def render_video(manifest_path: Path, out_path: Path | None = None,
                  height: int = 1080, fps: int = 24, logger: str | None = "bar",
-                 progress=None) -> Path:
+                 progress=None, vertical: bool | None = None) -> Path:
     """
     Render the whole documentary. Returns the path of the MP4.
+    height:   the SHORT side (1080 = 1920x1080, or 1080x1920 when vertical)
+    vertical: 9:16 for phones; None = whatever the manifest says (style "short")
     progress: optional callback(percent) for live progress (replaces the terminal bar).
     """
     manifest_path = Path(manifest_path)
     manifest_dir = manifest_path.parent
     manifest = load_manifest(manifest_path)
-    width = round(height * 16 / 9) // 2 * 2            # H.264 needs even sizes
-    frame = (width, height)
+    if vertical is None:
+        vertical = bool(manifest.get("vertical"))
+    long_side = round(height * 16 / 9) // 2 * 2        # H.264 needs even sizes
+    frame = (height, long_side) if vertical else (long_side, height)
     out_path = Path(out_path or manifest_dir / "documentary.mp4")
 
     clips, audios = [], []
@@ -289,7 +293,7 @@ def render_video(manifest_path: Path, out_path: Path | None = None,
     # 1) Title card over a blurred version of the first image
     first_shot = manifest["scenes"][0]["shots"][0]["image_path"]
     title_bg, _ = prepare_still(_find(first_shot, manifest_dir), frame)
-    title_lines = textwrap.wrap(manifest["title"], width=28)
+    title_lines = textwrap.wrap(manifest["title"], width=16 if vertical else 28)
     clips.append(still_clip([text_card(title_lines, frame, height // 13, title_bg)],
                             frame, TITLE_SECONDS, fade=0.8, card=True))
 
@@ -308,10 +312,10 @@ def render_video(manifest_path: Path, out_path: Path | None = None,
         clips.append(clip.with_audio(audio))
 
     # 3) Credits, a few lines per card
-    lines = _credit_lines(manifest)
+    lines = _credit_lines(manifest, max_len=40 if vertical else 80)
     header = ["Images"]
-    footer = ["", f"Narration: {manifest.get('voice', 'Microsoft Edge TTS')}",
-              "Research and script: AI agent built with LangGraph"]
+    footer = ["", "Narration:", manifest.get("voice", "Microsoft Edge TTS"),
+              "", "Research and script:", "AI agent built with LangGraph"]
     pages = [lines[i:i + CREDIT_LINES_PER_CARD] for i in range(0, len(lines), CREDIT_LINES_PER_CARD)] or [[]]
     for n, page in enumerate(pages):
         body = header + [""] + page + (footer if n == len(pages) - 1 else [])

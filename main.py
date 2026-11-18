@@ -20,6 +20,7 @@ from langgraph.types import Command  # noqa: E402
 
 from doc_agent.graph import build_graph  # noqa: E402
 from doc_agent.runs import fork_before_script, make_checkpointer  # noqa: E402
+from doc_agent.styles import DEFAULT_STYLE, STYLES  # noqa: E402
 
 
 def slugify(text: str) -> str:
@@ -137,6 +138,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("topic", nargs="?", help="Documentary topic (only for new runs)")
     parser.add_argument("--minutes", type=int, default=1)
+    parser.add_argument("--style", choices=list(STYLES), default=DEFAULT_STYLE,
+                        help="documentary, kids or short (vertical 60-second video)")
     parser.add_argument("--thread", default="default", help="Run ID; reuse it to resume")
     parser.add_argument("--draw", action="store_true", help="Print the graph as Mermaid and exit")
     parser.add_argument("--history", action="store_true", help="List this thread's checkpoints and exit")
@@ -190,7 +193,7 @@ def main() -> None:
             if not args.topic:
                 parser.error("topic is required for a new thread")
             print(f"▶  Starting thread '{args.thread}': {args.topic}")
-            next_input = {"topic": args.topic, "target_minutes": args.minutes}
+            next_input = {"topic": args.topic, "target_minutes": args.minutes, "style": args.style}
 
         # Run -> pause at review -> ask human -> resume -> ... until the graph ends.
         while True:

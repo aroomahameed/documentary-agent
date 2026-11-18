@@ -49,6 +49,12 @@ Each shot is one of two kinds:
   Best for past events, people from before photography, and ideas that can't be photographed.
 Choose the kind that fits each moment; don't force a mix if the subject doesn't need it.
 
+Plan shots a FREE PUBLIC IMAGE LIBRARY is likely to have: real places, buildings,
+objects, animals, natural phenomena, well-known artworks and maps. Avoid staged
+scenes ("a scientist watching a screen", "a hand opening a can") and custom
+diagrams of an idea: those are made by film crews and rarely exist for free.
+Show the real thing instead (the seismograph itself, the volcano erupting).
+
 Every shot must show a DIFFERENT SUBJECT, not the same thing from another angle.
 For a scene about the Colosseum: the Colosseum, a painting of gladiators,
 a statue of Emperor Vespasian, a map of ancient Rome. NOT four views of the Colosseum.
@@ -65,6 +71,10 @@ Also give 1-2 broad fallback_queries for the scene's overall subject
 IMAGE_PICK_PROMPT = """You pick the best image for one shot of a documentary.
 You get the narration, what the shot should show, and numbered image titles.
 Judge ONLY the main subject: which person, place, object or event it shows.
+The KIND doesn't have to match: a photo of the right subject is fine when the shot
+asked for a painting or diagram, and the other way round. Close relatives of the
+subject count too (a seismograph for "a seismologist at work", volcanic rock full of
+gas holes for "gas bubbles in magma").
 IGNORE time of day, weather, lighting, season, camera angle and composition details
 in the description ("at golden hour", "reflected in the river", "aerial"): a clear
 daytime photo of the right building is a match.
@@ -84,6 +94,10 @@ IMAGE_CHECK_PROMPT = """You check whether an image fits one shot of a documentar
 Describe what the image actually shows, then decide if it matches.
 
 Judge ONLY the main subject: which person, place, object or event it shows.
+The KIND doesn't have to match: a photo of the right subject is fine when the shot
+asked for a painting or diagram, and the other way round. Close relatives of the
+subject count too (a seismograph for "a seismologist at work", volcanic rock full of
+gas holes for "gas bubbles in magma").
 IGNORE time of day, weather, lighting, season, camera angle and composition details
 in the description ("at golden hour", "reflected in the river", "aerial"): a clear
 daytime photo of the right building is a match.

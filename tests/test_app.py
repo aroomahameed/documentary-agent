@@ -107,3 +107,16 @@ def test_broken_image_file_does_not_crash_the_gallery(app, fake):  # noqa: F811
     assert not app.exception
     assert app.subheader[0].value == "Review the scenes"
     assert any("broken" in w.value for w in app.warning)
+
+
+def test_redo_clears_the_notes(app, fake):  # noqa: F811
+    create(app)
+    button(app, "✅ Approve").click().run()
+    app.main.text_input[0].input("more paintings")
+    app.run()
+    assert button(app, "🔁 Redo").label == "🔁 Redo"          # no counter in the label
+    button(app, "🔁 Redo").click().run()
+
+    assert not app.exception
+    assert all(t.value == "" for t in app.main.text_input)   # fresh, empty note fields
+    assert button(app, "🔁 Redo").disabled                    # nothing to redo yet

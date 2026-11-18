@@ -27,6 +27,7 @@ from langgraph.types import Command  # noqa: E402
 from doc_agent.graph import build_graph  # noqa: E402
 from doc_agent.media import is_image  # noqa: E402
 from doc_agent.runs import fork_before_script, list_threads, make_checkpointer, run_status  # noqa: E402
+from doc_agent.styles import STYLES, get_style  # noqa: E402
 
 st.set_page_config(page_title="Documentary Agent", page_icon="🎬", layout="wide")
 
@@ -114,7 +115,9 @@ with st.sidebar:
     st.header("🎬 Documentary Agent")
     with st.form("new_run", clear_on_submit=True):
         topic = st.text_input("Topic", placeholder="e.g. History of the Taj Mahal")
-        minutes = st.number_input("Length (minutes)", min_value=1, max_value=5, value=1)
+        style = st.selectbox("Style", list(STYLES), format_func=lambda s: STYLES[s].label)
+        minutes = st.number_input("Length (minutes)", min_value=1, max_value=5, value=1,
+                                  help="Ignored for the 60-second short")
         start = st.form_submit_button("Create documentary", type="primary")
 
     st.subheader("Runs")
@@ -133,7 +136,7 @@ if start and topic.strip():
     thread = f"{slug}-{datetime.now():%H%M%S}"
     st.session_state.thread = thread
     st.title(topic)
-    run(thread, {"topic": topic.strip(), "target_minutes": int(minutes)})
+    run(thread, {"topic": topic.strip(), "target_minutes": int(minutes), "style": style})
 
 thread = st.session_state.get("thread")
 if not thread:
@@ -147,7 +150,7 @@ snapshot = graph.get_state(cfg(thread))
 values = snapshot.values
 status = run_status(snapshot)
 st.title(values.get("script").title if values.get("script") else values.get("topic", thread))
-st.caption(f"Run `{thread}` · {STATUS_LABEL[status]}")
+st.caption(f"Run `{thread}` · {get_style(values.get('style')).label} · {STATUS_LABEL[status]}")
 
 
 # --- Pages, one per run status ---------------------------------------------
@@ -175,6 +178,10 @@ elif status == "production_review":
         st.success("Quality check: all files OK")
     st.caption("Write a note under any scene you want redone, e.g. *use a map of the empire*.")
 
+    # Note fields get a "round" in their key: after a redo the round goes up, so the
+    # page shows NEW, empty fields (Streamlit remembers a field's text by its key).
+    round_key = f"redo_round_{thread}"
+    round_no = st.session_state.get(round_key, 0)
     notes = {}
     for p in values.get("produced_scenes", []):
         with st.container(border=True):
@@ -190,14 +197,16 @@ elif status == "production_review":
             st.audio(p.audio_path)
             for problem in p.problems:
                 st.caption(f"⚠ {problem}")
-            notes[p.scene_number] = st.text_input("Redo note", key=f"note_{thread}_{p.scene_number}",
+            notes[p.scene_number] = st.text_input("Redo note", key=f"note_{thread}_{round_no}_{p.scene_number}",
                                                   placeholder="leave empty to keep this scene")
 
     redo = {n: note.strip() for n, note in notes.items() if note.strip()}
     c1, c2, c3 = st.columns(3)
     if c1.button("🎬 Render video", type="primary", use_container_width=True):
         run(thread, Command(resume={"action": "render"}))
-    if c2.button(f"🔁 Redo {len(redo)} scene(s)", use_container_width=True, disabled=not redo):
+    if c2.button("🔁 Redo", use_container_width=True, disabled=not redo,
+                 help="Re-produce the scenes that have a redo note"):
+        st.session_state[round_key] = round_no + 1      # next page: empty note fields
         run(thread, Command(resume={"action": "redo", "scenes": redo}))
     if c3.button("⏹ Stop (keep the media)", use_container_width=True):
         run(thread, Command(resume={"action": "stop"}))

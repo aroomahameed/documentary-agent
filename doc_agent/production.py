@@ -33,6 +33,8 @@ import re
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 
+import aiohttp
+from edge_tts.exceptions import EdgeTTSException
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -53,6 +55,11 @@ from .media import (
 )
 from .prompts import IMAGE_CHECK_PROMPT, IMAGE_PICK_PROMPT, SHOT_PLAN_PROMPT, VOICE_PROMPT
 from .state import LLMOutput, ProducedScene, Scene, Shot
+from .styles import get_style
+
+# Errors a voice SERVICE can cause. Only these trigger the fallback voices; anything
+# else (e.g. a TypeError) is a bug in our code and should fail loudly, right away.
+TTS_ERRORS = (EdgeTTSException, aiohttp.ClientError, OSError, TimeoutError)
 
 WORDS_PER_SECOND = 140 / 60      # same speaking rate the script writer uses
 SECONDS_PER_SHOT = 5             # change the picture about every 5 seconds
@@ -99,6 +106,7 @@ class SceneState(TypedDict, total=False):
     media_dir: str
     voice: str              # chosen ONCE for the whole documentary (see choose_voice)
     notes: str              # director's notes when a scene is redone (production review)
+    style: str              # style preset: decides the narrator's speed and pitch
     # filled by the parallel branches
     shots: list[Shot]
     audio_path: str
@@ -123,7 +131,7 @@ def progress(scene_number: int, message: str) -> None:
     get_stream_writer()({"scene": scene_number, "msg": message})
 
 
-def choose_voice(topic: str) -> tuple[str, str]:
+def choose_voice(topic: str, voice_hint: str = "") -> tuple[str, str]:
     """
     Pick ONE narrator for the whole documentary. Returns (voice, reason).
     Called once before the scenes are produced, so every scene sounds the same.
@@ -138,7 +146,8 @@ def choose_voice(topic: str) -> tuple[str, str]:
     )
     choice = get_llm().with_structured_output(VoiceChoice).invoke([
         SystemMessage(VOICE_PROMPT.format(catalog=catalog)),
-        HumanMessage(f"Documentary topic: {topic}"),
+        HumanMessage(f"Documentary topic: {topic}"
+                     + (f"\nThe style needs {voice_hint}." if voice_hint else "")),
     ])
     if choice.voice not in VOICES:               # never trust a name the LLM made up
         return DEFAULT_VOICE, f"'{choice.voice}' is not an approved voice, using the default"
@@ -327,8 +336,9 @@ def voiceover(state: SceneState) -> dict:
     errors = []
     for voice in order:
         try:
-            text_to_speech(scene.narration, path, voice=voice)
-        except Exception as e:  # noqa: BLE001
+            style = get_style(state.get("style"))
+            text_to_speech(scene.narration, path, voice=voice, rate=style.rate, pitch=style.pitch)
+        except TTS_ERRORS as e:
             errors.append(f"{voice}: {type(e).__name__}")
             continue
         result = {"audio_path": str(path), "duration_sec": audio_duration(path)}
