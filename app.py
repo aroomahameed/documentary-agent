@@ -189,7 +189,8 @@ elif status == "production_review":
             shown = [s for s in p.shots if is_image(s.image_path)]   # never crash on a broken file
             if shown:
                 st.image([s.image_path for s in shown], width=240,
-                         caption=[f"{s.kind}: {s.description[:50]}" for s in shown])
+                         caption=[f"at “{s.anchor}”" if s.anchor else f"{s.kind}: {s.description[:50]}"
+                                  for s in shown])
             if len(shown) < len(p.shots):
                 st.warning(f"{len(p.shots) - len(shown)} image file(s) are broken and can't be "
                            "shown. Redo this scene to replace them.")

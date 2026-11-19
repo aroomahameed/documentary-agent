@@ -93,6 +93,8 @@ class Shot(BaseModel):
     kind: str                       # "photo", "artwork" or "title_card"
     description: str                # what the picture editor wanted to show
     credit: str = ""                # "Title by Author (CC BY 2.0) <page>", empty for title cards
+    anchor: str = ""                # the narration words this shot illustrates
+    start: float = 0.0              # where it starts, as a fraction of the narration (0-1)
 
 
 class ProducedScene(BaseModel):

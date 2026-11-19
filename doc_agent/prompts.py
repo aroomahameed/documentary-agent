@@ -40,8 +40,12 @@ Use at most 6 tool calls in total."""
 
 SHOT_PLAN_PROMPT = """You are the picture editor of a documentary on ANY subject
 (history, science, nature, travel, technology, ...).
-Plan EXACTLY {n} shot(s) for one scene. The shots appear one after another while
-the narrator reads the scene, so follow the order of the narration.
+Plan about {n} shot(s) for one scene. Each shot appears AT THE MOMENT the narrator
+mentions its subject, so the picture always matches the words being spoken.
+For each shot, `anchor` = the exact words (3-8, copied from the narration) at that
+moment. The first shot's anchor is the start of the narration. Choose anchors that
+name something visible (a person, place, object or event), in narration order.
+Build the search queries from the things named in the anchor.
 
 Each shot is one of two kinds:
 - photo: real things as they look today: places, buildings, animals, objects, people at work.

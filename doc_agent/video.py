@@ -177,27 +177,36 @@ def ken_burns_frame(still: Image.Image, frame: tuple[int, int], progress: float,
     return np.asarray(still.resize(frame, Image.BILINEAR, box=box))
 
 
-def plan_moves(fitted: list[bool], duration: float) -> list[tuple[int, tuple, float, float]]:
+def plan_moves(fitted: list[bool], duration: float,
+               starts: list[float] | None = None) -> list[tuple[int, tuple, float, float]]:
     """
     Split a scene into (still index, move, start, end) segments.
-    Every still gets an equal share of the time; a share longer than
-    MAX_MOVE_SECONDS becomes several different moves over the same still.
+    starts: when each still appears, in seconds (e.g. when its anchor words are
+    spoken). Missing -> every still gets an equal share of the time.
+    A still shown longer than MAX_MOVE_SECONDS gets several different moves.
     """
-    span = duration / len(fitted)
+    n = len(fitted)
+    if not starts or len(starts) != n:
+        starts = [i * duration / n for i in range(n)]
+    starts = [0.0] + [min(max(s, 0.0), duration) for s in starts[1:]]   # always start with a picture
+    ends = starts[1:] + [duration]
+
     segments, counter = [], 0
-    for i, is_fitted in enumerate(fitted):
+    for i, (is_fitted, a, b) in enumerate(zip(fitted, starts, ends)):
+        if b - a < 0.05:                          # no time left for this still: skip it
+            continue
         moves = FITTED_MOVES if is_fitted else PHOTO_MOVES
-        k = max(1, math.ceil(span / MAX_MOVE_SECONDS))
+        k = max(1, math.ceil((b - a) / MAX_MOVE_SECONDS))
         for j in range(k):
-            start = i * span + j * span / k
-            segments.append((i, moves[counter % len(moves)], start, start + span / k))
+            seg_start = a + j * (b - a) / k
+            segments.append((i, moves[counter % len(moves)], seg_start, seg_start + (b - a) / k))
             counter += 1                          # the next segment always moves differently
     return segments
 
 
 def still_clip(stills: list[Image.Image], frame: tuple[int, int], duration: float,
                fade: float = SCENE_FADE, fitted: list[bool] | None = None,
-               card: bool = False) -> VideoClip:
+               card: bool = False, starts: list[float] | None = None) -> VideoClip:
     """
     A clip that shows `stills` in turn, each with one or more camera moves,
     cross-fading between segments and fading in/out at the ends.
@@ -205,7 +214,7 @@ def still_clip(stills: list[Image.Image], frame: tuple[int, int], duration: floa
     if card:
         segments = [(0, CARD_MOVE, 0.0, duration)]
     else:
-        segments = plan_moves(fitted or [False] * len(stills), duration)
+        segments = plan_moves(fitted or [False] * len(stills), duration, starts)
     starts = [s[2] for s in segments]
 
     def render(seg: tuple, t: float) -> np.ndarray:
@@ -303,12 +312,15 @@ def render_video(manifest_path: Path, out_path: Path | None = None,
         audios.append(audio)
         # Skip image files that can't be opened (the quality check reports them);
         # if none are left, show the narration's scene number on a plain card instead.
-        paths = [_find(s["image_path"], manifest_dir) for s in scene["shots"]]
-        prepared = [prepare_still(p, frame) for p in paths if _opens(p)]
+        usable = [s for s in scene["shots"] if _opens(_find(s["image_path"], manifest_dir))]
+        prepared = [prepare_still(_find(s["image_path"], manifest_dir), frame) for s in usable]
+        # Each picture appears when its anchor words are spoken: `start` is a fraction
+        # of the narration, so multiply by the narration's length in seconds.
+        starts = [s.get("start", 0.0) * audio.duration for s in usable] if usable else None
         if not prepared:
             prepared = [(text_card([f"Scene {scene['scene_number']}"], frame, height // 13), False)]
         stills, fitted = [p[0] for p in prepared], [p[1] for p in prepared]
-        clip = still_clip(stills, frame, audio.duration + SCENE_PAD, fitted=fitted)
+        clip = still_clip(stills, frame, audio.duration + SCENE_PAD, fitted=fitted, starts=starts)
         clips.append(clip.with_audio(audio))
 
     # 3) Credits, a few lines per card

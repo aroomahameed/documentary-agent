@@ -5,4 +5,5 @@ output/
 checkpoints.db
 .pytest_cache/
 .cache/
+checkpoints.db*
 

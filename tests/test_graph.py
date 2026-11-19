@@ -99,7 +99,8 @@ class Fake:
                 if schema is production.ShotPlan:
                     fake.plan_requests.append(text)
                     return production.ShotPlan(
-                        shots=[production.ShotIdea(description="a fort", kind="photo", queries=["fort"])],
+                        shots=[production.ShotIdea(anchor="Draft", description="a fort",
+                                                   kind="photo", queries=["fort"])],
                         fallback_queries=["castle"],
                     )
                 if schema is production.ImageChoice:
@@ -578,3 +579,61 @@ def test_a_bug_in_voice_code_is_not_hidden_as_a_voice_failure(fake, graph, monke
 
     with pytest.raises(TypeError):                             # fails at once, with the real error
         graph.invoke(Command(resume={"action": "approve"}), config())
+
+
+# ---------------------------------------------------------------------------
+# Shots appear when their words are spoken
+# ---------------------------------------------------------------------------
+
+NARRATION = ("In 1526 Babur crossed the mountains into India. At Panipat his small army "
+             "defeated the sultan. Years later his grandson Akbar built a red city called "
+             "Fatehpur Sikri, and Shah Jahan built the Taj Mahal for his wife.")
+
+
+def idea(anchor):
+    return production.ShotIdea(anchor=anchor, description=anchor, kind="photo", queries=[anchor])
+
+
+def test_anchor_found_exactly_and_loosely():
+    tokens = production._tokens(NARRATION)
+    assert anchor_at(tokens, "Shah Jahan built the Taj Mahal") == tokens.index("shah")
+    assert anchor_at(tokens, "Panipat his small army") is not None
+    assert anchor_at(tokens, "Akbar built a magnificent palace") == tokens.index("akbar")   # 1 word changed
+    assert anchor_at(tokens, "the Great Wall of China") is None
+
+
+def anchor_at(tokens, anchor):
+    return production.anchor_start(tokens, anchor)
+
+
+def test_shots_are_placed_in_narration_order():
+    ideas = [idea("Shah Jahan built the Taj Mahal"), idea("In 1526 Babur crossed"),
+             idea("his grandson Akbar built")]                       # given out of order
+    placed = production.place_shots(NARRATION, ideas)
+
+    assert [i.anchor for _, i in placed] == ["In 1526 Babur crossed", "his grandson Akbar built",
+                                             "Shah Jahan built the Taj Mahal"]
+    starts = [s for s, _ in placed]
+    assert starts[0] == 0.0 and starts == sorted(starts) and starts[-1] > 0.7
+
+
+def test_shots_too_close_together_are_dropped():
+    ideas = [idea("In 1526 Babur crossed"), idea("Babur crossed the mountains"), idea("Shah Jahan built")]
+    placed = production.place_shots(NARRATION, ideas)
+
+    assert [i.anchor for _, i in placed] == ["In 1526 Babur crossed", "Shah Jahan built"]
+
+
+def test_renderer_switches_pictures_at_the_given_times():
+    from doc_agent.video import plan_moves
+    segments = plan_moves([False, False, False], duration=20.0, starts=[0.0, 12.0, 15.0])
+    first_seen = {}
+    for still, _move, start, _end in segments:
+        first_seen.setdefault(still, start)
+    assert first_seen == {0: 0.0, 1: 12.0, 2: 15.0}           # not 0 / 6.7 / 13.3 (equal shares)
+
+
+def test_old_manifests_without_starts_still_split_equally():
+    from doc_agent.video import plan_moves
+    starts = sorted({s for i, _m, s, _e in plan_moves([False, False], 10.0) if _m})
+    assert starts[0] == 0.0 and 5.0 in starts

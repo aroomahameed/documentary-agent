@@ -64,6 +64,7 @@ TTS_ERRORS = (EdgeTTSException, aiohttp.ClientError, OSError, TimeoutError)
 WORDS_PER_SECOND = 140 / 60      # same speaking rate the script writer uses
 SECONDS_PER_SHOT = 5             # change the picture about every 5 seconds
 MAX_SHOTS = 4
+MIN_SHOT_SECONDS = 3             # shots closer together than this are dropped (too hectic)
 MAX_PICKS_PER_SHOT = 2           # LLM picker calls per shot, to keep costs predictable
 # Vision check: the LLM looks at each chosen image. Set VERIFY_IMAGES=false in .env to save cost.
 VERIFY_IMAGES = os.getenv("VERIFY_IMAGES", "true").lower() != "false"
@@ -72,6 +73,8 @@ VERIFY_IMAGES = os.getenv("VERIFY_IMAGES", "true").lower() != "false"
 # --- LLM output models --------------------------------------------------------
 
 class ShotIdea(LLMOutput):
+    anchor: str = Field(description="The exact words (3-8) from the narration at the moment "
+                                    "this shot should appear, copied exactly")
     description: str = Field(description="What this shot shows, one short sentence")
     kind: Literal["photo", "artwork"]
     queries: list[str] = Field(description="2-3 short search queries, most specific first")
@@ -154,6 +157,57 @@ def choose_voice(topic: str, voice_hint: str = "") -> tuple[str, str]:
     return choice.voice, choice.reason
 
 
+def _tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def anchor_start(narration_tokens: list[str], anchor: str) -> int | None:
+    """
+    Word position where `anchor` appears in the narration, or None.
+    The LLM is asked to copy the words exactly; CODE checks that it did.
+    Falls back to the anchor's first two words (LLMs sometimes change a word).
+    """
+    words = _tokens(anchor)
+    for length in (len(words), 2):
+        head = words[:length]
+        if not head:
+            break
+        for i in range(len(narration_tokens) - len(head) + 1):
+            if narration_tokens[i:i + len(head)] == head:
+                return i
+    return None
+
+
+def place_shots(narration: str, ideas: list) -> list[tuple[float, object]]:
+    """
+    Decide WHEN each planned shot appears: (start fraction 0-1, idea), in narration order.
+      - start = where its anchor is spoken (word position / total words; the narrator
+        speaks at a steady pace, so word position ~ time)
+      - an anchor that isn't in the narration gets an evenly spaced position
+      - shots closer than MIN_SHOT_SECONDS to the previous one are dropped
+      - the first shot always starts at 0, so the scene never begins without a picture
+    """
+    tokens = _tokens(narration)
+    total = max(len(tokens), 1)
+    placed = []
+    for i, idea in enumerate(ideas):
+        pos = anchor_start(tokens, idea.anchor)
+        if pos is None:
+            pos = round(i * total / len(ideas))
+        placed.append((pos / total, idea))
+    placed.sort(key=lambda p: p[0])
+
+    min_gap = MIN_SHOT_SECONDS * WORDS_PER_SECOND / total     # in fractions of the narration
+    kept = []
+    for start, idea in placed:
+        if kept and start - kept[-1][0] < min_gap:
+            continue
+        kept.append((start, idea))
+    if kept:
+        kept[0] = (0.0, kept[0][1])
+    return kept
+
+
 def shot_count(narration: str) -> int:
     """Estimate how many shots a scene needs from its length. Code decides, not the LLM."""
     seconds = len(narration.split()) / WORDS_PER_SECOND
@@ -191,7 +245,8 @@ def verify_image(path: Path, idea: ShotIdea, title: str = "") -> tuple[bool, str
     check = get_llm().with_structured_output(ImageCheck).invoke([
         SystemMessage(IMAGE_CHECK_PROMPT),
         HumanMessage(content=[
-            {"type": "text", "text": f"The shot should show ({idea.kind}): {idea.description}\n"
+            {"type": "text", "text": f"The narrator is saying: “{idea.anchor}”\n"
+                                     f"The shot should show ({idea.kind}): {idea.description}\n"
                                      f"The image's title at its source: {title or '(none)'}"},
             {"type": "image_url",
              "image_url": {"url": f"data:image/jpeg;base64,{image_preview_b64(path)}"}},
@@ -243,8 +298,8 @@ def find_image(idea: ShotIdea, narration: str, fallback_queries: list[str],
         listing = "\n".join(f"[{i}] {c['alt']}" for i, c in enumerate(candidates, 1))
         choice = get_llm().with_structured_output(ImageChoice).invoke([
             SystemMessage(IMAGE_PICK_PROMPT),
-            HumanMessage(f"Narration: {narration}\nThis shot should show ({kind}): "
-                         f"{idea.description}\n\nImages:\n{listing}"),
+            HumanMessage(f"Narration: {narration}\nThe narrator is saying: “{idea.anchor}”\n"
+                         f"This shot should show ({kind}): {idea.description}\n\nImages:\n{listing}"),
         ])
         if not 1 <= choice.number <= len(candidates):
             reasons.append(f"'{query}' ({kind}): picker rejected {len(candidates)} ({choice.reason})")
@@ -290,11 +345,13 @@ def find_visuals(state: SceneState) -> dict:
         HumanMessage(request),
     ])
 
-    # 2) Fill each shot (code enforces the limit, "no repeats" and "no near-duplicates")
+    # 2) Decide WHEN each shot appears (at its anchor words), then fill them
+    #    (code enforces the limit, the timing, "no repeats" and "no near-duplicates")
+    placed = place_shots(scene.narration, plan.shots[:MAX_SHOTS])
     shots, problems, used_urls, used_titles = [], [], set(), []
-    progress(scene.scene_number, f"planned {len(plan.shots[:MAX_SHOTS])} shot(s)")
-    for i, idea in enumerate(plan.shots[:MAX_SHOTS], 1):
-        progress(scene.scene_number, f"shot {i}: looking for {idea.kind}: {idea.description[:60]}")
+    progress(scene.scene_number, f"planned {len(placed)} shot(s)")
+    for i, (start, idea) in enumerate(placed, 1):
+        progress(scene.scene_number, f"shot {i} at “{idea.anchor[:40]}”: looking for {idea.kind}")
         path = media_dir / f"scene_{scene.scene_number:02d}_shot_{len(shots) + 1}.jpg"
         image, kind, reasons = find_image(idea, scene.narration, plan.fallback_queries,
                                           used_urls, used_titles, path)
@@ -309,6 +366,7 @@ def find_visuals(state: SceneState) -> dict:
         shots.append(Shot(
             image_path=str(path), kind=kind, description=idea.description,
             credit=f"\"{image['alt']}\" by {image['author']} ({image['license']}) {image['page']}",
+            anchor=idea.anchor, start=start,
         ))
 
     # 3) Every shot failed: one title card so the scene still has a picture
