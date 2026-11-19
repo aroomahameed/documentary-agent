@@ -60,6 +60,8 @@ class Fake:
         self.tts_calls: list[str] = []      # voices used, one per narrated scene
         self.tts_fails = False
         self.tts_style = None
+        self.voice_failures: dict[str, int] = {}
+        self.tts_attempts: list[str] = []
         self.planner_prompts: list[str] = []
         self.plan_requests: list[str] = []  # what the shot planner was asked (per scene)
         self.renders: list[str] = []        # manifests passed to the renderer
@@ -159,6 +161,11 @@ class Fake:
     def text_to_speech(self, text, path, voice=None, rate=None, pitch=None):
         if self.tts_fails:
             raise ConnectionError("TTS down")
+        if self.voice_failures.get(voice, 0) > 0:          # this voice fails N more times
+            self.voice_failures[voice] -= 1
+            self.tts_attempts.append(voice)
+            raise ConnectionError(f"{voice} hiccup")
+        self.tts_attempts.append(voice)
         self.tts_calls.append(voice)
         self.tts_style = (rate, pitch)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +188,7 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(production, "text_to_speech", f.text_to_speech)
     monkeypatch.setattr(production, "audio_duration", lambda path: 3.0)
     monkeypatch.setattr(nodes, "render_mp4", f.render)
+    monkeypatch.setattr(production, "VOICE_RETRY_WAIT", 0)   # no real waiting in tests
     return f
 
 
@@ -663,6 +671,7 @@ def test_urdu_run_uses_urdu_writer_and_voice(fake, graph, monkeypatch):
     snap = resume(graph, {"action": "approve"})
 
     assert "Write every scene's `narration` in URDU" in fake.writer_prompts[-1]
+    assert fake.tts_style == ("+0%", "+0Hz")                   # Urdu: normal speed and pitch
     assert snap.values["voice"] == "ur-PK-AsadNeural"          # ...is ignored for Urdu; the LLM's
     assert set(fake.tts_calls) == {"ur-PK-AsadNeural"}         # English pick is rejected too
     import json
@@ -692,3 +701,31 @@ def test_urdu_version_of_a_finished_documentary(fake, graph):
     assert len(fake.researched) == searches                    # same research, reused
     assert "URDU" in fake.writer_prompts[-1]
     assert snap.values["language"] == "ur" and snap.values["voice"].startswith("ur-PK")
+
+
+# ---------------------------------------------------------------------------
+# One narrator per documentary
+# ---------------------------------------------------------------------------
+
+def test_short_voice_failure_retries_the_same_voice(fake, graph):
+    fake.voice_failures = {"en-GB-RyanNeural": 2}             # fails twice, then works
+    start(graph)
+    snap = resume(graph, {"action": "approve"})
+
+    assert set(fake.tts_calls) == {"en-GB-RyanNeural"}         # never switched narrator
+    assert snap.values["quality_issues"] == []
+
+
+def test_voice_switch_is_last_resort_and_flagged(fake, graph):
+    fake.voice_failures = {"en-GB-RyanNeural": 3}             # 3 failures: scene 1 must switch
+    start(graph)
+    snap = resume(graph, {"action": "approve"})
+
+    assert fake.tts_attempts[:4] == ["en-GB-RyanNeural"] * 3 + ["en-US-AndrewMultilingualNeural"]
+    assert any("narrated by en-US-AndrewMultilingualNeural instead of en-GB-RyanNeural" in i
+               for i in snap.values["quality_issues"])
+
+    # a redo of that scene re-records it with the right voice, and the issue disappears
+    produced_scene = [p for p in snap.values["produced_scenes"] if p.voice != "en-GB-RyanNeural"][0]
+    snap = resume(graph, {"action": "redo", "scenes": {produced_scene.scene_number: "re-record"}})
+    assert snap.values["quality_issues"] == []

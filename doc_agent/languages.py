@@ -20,6 +20,10 @@ class Language:
     voices: dict[str, str] = field(default_factory=dict)   # approved narrators for this language
     default_voice: str = ""
     rtl: bool = False                             # written right-to-left (for displaying it)
+    # Speaking speed/pitch for this language, overriding the style's. None = use the style's.
+    # Needed for Urdu: the service returns NO audio when Urdu voices get a slower or deeper
+    # delivery (tested: "-15%"/"-8Hz" -> NoAudioReceived, normal -> works).
+    speech: tuple[str, str] | None = None
 
 
 LANGUAGES: dict[str, Language] = {
@@ -42,6 +46,7 @@ LANGUAGES: dict[str, Language] = {
         },
         default_voice="ur-PK-AsadNeural",
         rtl=True,
+        speech=("+0%", "+0Hz"),
     ),
 }
 DEFAULT_LANGUAGE = "en"

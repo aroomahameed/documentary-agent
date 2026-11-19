@@ -309,6 +309,9 @@ def quality_check(state: DocState) -> dict:
             issues.append(f"scene {n}: no images found, only a title card")
         elif len(p.shots) == 1 and p.duration_sec > 15:
             issues.append(f"scene {n}: a single image for {p.duration_sec:.0f}s")
+        if p.voice and p.voice != state.get("voice"):
+            issues.append(f"scene {n}: narrated by {p.voice} instead of {state.get('voice')} "
+                          "(the voice service failed); redo this scene to re-record it")
     return {"quality_issues": issues}
 
 

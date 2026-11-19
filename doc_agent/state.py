@@ -105,6 +105,7 @@ class ProducedScene(BaseModel):
     shots: list[Shot]
     audio_path: str
     duration_sec: float
+    voice: str = ""                 # the voice that ACTUALLY narrated it (may differ after a failure)
     problems: list[str] = Field(default_factory=list)   # e.g. "shot 2: nothing found"
 
 

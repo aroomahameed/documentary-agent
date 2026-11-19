@@ -30,6 +30,7 @@ so every scene sounds the same.
 import operator
 import os
 import re
+import time
 from pathlib import Path
 from typing import Annotated, Literal, TypedDict
 
@@ -63,6 +64,11 @@ TTS_ERRORS = (EdgeTTSException, aiohttp.ClientError, OSError, TimeoutError)
 WORDS_PER_SECOND = 140 / 60      # same speaking rate the script writer uses
 SECONDS_PER_SHOT = 5             # change the picture about every 5 seconds
 MAX_SHOTS = 4
+# The voice service sometimes fails for a few seconds. Retry the SAME voice first,
+# so the whole documentary keeps one narrator; switch voices only as a last resort.
+SAME_VOICE_ATTEMPTS = 3
+VOICE_RETRY_WAIT = 2.0          # seconds before the 2nd attempt, doubled before the 3rd
+
 MIN_SHOT_SECONDS = 3             # shots closer together than this are dropped (too hectic)
 MAX_PICKS_PER_SHOT = 2           # LLM picker calls per shot, to keep costs predictable
 # Vision check: the LLM looks at each chosen image. Set VERIFY_IMAGES=false in .env to save cost.
@@ -114,6 +120,7 @@ class SceneState(TypedDict, total=False):
     shots: list[Shot]
     audio_path: str
     duration_sec: float
+    voice_used: str
     problems: Annotated[list[str], operator.add]   # both branches may add problems at once
     # output
     produced_scenes: list[ProducedScene]
@@ -385,9 +392,12 @@ def find_visuals(state: SceneState) -> dict:
 
 def voiceover(state: SceneState) -> dict:
     """
-    Try the chosen voice first, then the other approved voices. edge-tts sometimes
-    fails for one voice at a time, so a fallback voice keeps the documentary going.
-    If EVERY voice fails, raise: RetryPolicy waits and runs this node again.
+    Record the narration with the documentary's voice.
+      1. Try the CHOSEN voice up to SAME_VOICE_ATTEMPTS times, with short waits:
+         the free voice service often fails for just a few seconds.
+      2. Only then fall back to the other approved voices of the language, so the
+         run doesn't fail (the quality check then flags the different narrator).
+      3. If every voice fails, raise: RetryPolicy waits and runs this node again.
     """
     scene = state["scene"]
     path = Path(state["media_dir"]) / f"scene_{scene.scene_number:02d}.mp3"
@@ -395,18 +405,26 @@ def voiceover(state: SceneState) -> dict:
     chosen = state.get("voice") or lang.default_voice
     order = [chosen] + [v for v in lang.voices if v != chosen]     # fall back within the language
 
+    style = get_style(state.get("style"))
+    rate, pitch = lang.speech or (style.rate, style.pitch)   # some languages need their own settings
+    attempts = [chosen] * SAME_VOICE_ATTEMPTS + order[1:]
+
     progress(scene.scene_number, f"recording narration ({chosen})")
     errors = []
-    for voice in order:
+    for n, voice in enumerate(attempts):
+        if 0 < n < SAME_VOICE_ATTEMPTS:              # retries of the chosen voice: wait a little
+            wait = VOICE_RETRY_WAIT * 2 ** (n - 1)
+            progress(scene.scene_number, f"voice failed, retrying {chosen} in {wait:.0f}s")
+            time.sleep(wait)
         try:
-            style = get_style(state.get("style"))
-            text_to_speech(scene.narration, path, voice=voice, rate=style.rate, pitch=style.pitch)
+            text_to_speech(scene.narration, path, voice=voice, rate=rate, pitch=pitch)
         except TTS_ERRORS as e:
             errors.append(f"{voice}: {type(e).__name__}")
             continue
-        result = {"audio_path": str(path), "duration_sec": audio_duration(path)}
+        result = {"audio_path": str(path), "duration_sec": audio_duration(path), "voice_used": voice}
         if voice != chosen:
-            result["problems"] = [f"scene {scene.scene_number}: voice {chosen} failed, used {voice}"]
+            result["problems"] = [f"scene {scene.scene_number}: voice {chosen} failed "
+                                  f"{SAME_VOICE_ATTEMPTS} times, used {voice}"]
         return result
 
     # ConnectionError on purpose: RetryPolicy's default only retries network-type errors.
@@ -423,6 +441,7 @@ def finish(state: SceneState) -> dict:
         shots=state["shots"],
         audio_path=state["audio_path"],
         duration_sec=state["duration_sec"],
+        voice=state.get("voice_used", ""),
         problems=state.get("problems", []),
     )]}
 
