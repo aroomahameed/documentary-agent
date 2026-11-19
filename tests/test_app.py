@@ -120,3 +120,12 @@ def test_redo_clears_the_notes(app, fake):  # noqa: F811
     assert not app.exception
     assert all(t.value == "" for t in app.main.text_input)   # fresh, empty note fields
     assert button(app, "🔁 Redo").disabled                    # nothing to redo yet
+
+
+def test_urdu_narration_is_shown_right_to_left(app, fake):  # noqa: F811
+    app.sidebar.selectbox[1].select("ur")                    # the "Narration" menu
+    create(app)
+
+    assert not app.exception
+    assert "اردو" in app.caption[0].value                     # the run's language is shown
+    assert any('dir="rtl"' in m.value for m in app.markdown)  # narration aligned right-to-left

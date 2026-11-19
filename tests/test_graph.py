@@ -369,7 +369,7 @@ def test_made_up_voice_falls_back_to_default(fake, graph):
     start(graph)
     snap = resume(graph, {"action": "approve"})
 
-    assert snap.values["voice"] == production.DEFAULT_VOICE
+    assert snap.values["voice"] == "en-US-AndrewMultilingualNeural"      # the English default
 
 
 def test_manifest_written_for_stage5(fake, graph):
@@ -637,3 +637,58 @@ def test_old_manifests_without_starts_still_split_equally():
     from doc_agent.video import plan_moves
     starts = sorted({s for i, _m, s, _e in plan_moves([False, False], 10.0) if _m})
     assert starts[0] == 0.0 and 5.0 in starts
+
+
+# ---------------------------------------------------------------------------
+# Stage 7: Urdu narration
+# ---------------------------------------------------------------------------
+
+URDU = "سن پندرہ سو چھبیس میں بابر نے ہندوستان کا رخ کیا۔ بعد میں شاہ جہاں نے تاج محل بنوایا۔"
+
+
+def test_anchors_work_in_urdu_script():
+    import re
+    old_tokens = re.findall(r"[a-z0-9']+", URDU.lower())     # the old a-z word splitter
+    assert old_tokens == []                                    # finds NOTHING in Urdu
+
+    tokens = production._tokens(URDU)
+    assert production.anchor_start(tokens, "شاہ جہاں نے تاج محل") == tokens.index("شاہ")
+    placed = production.place_shots(URDU, [idea("سن پندرہ سو چھبیس"), idea("شاہ جہاں نے تاج محل")])
+    assert placed[1][0] > 0.5                                  # Shah Jahan comes late in the text
+
+
+def test_urdu_run_uses_urdu_writer_and_voice(fake, graph, monkeypatch):
+    monkeypatch.setenv("TTS_VOICE", "en-US-AndrewMultilingualNeural")   # an English favourite...
+    start(graph, language="ur")
+    snap = resume(graph, {"action": "approve"})
+
+    assert "Write every scene's `narration` in URDU" in fake.writer_prompts[-1]
+    assert snap.values["voice"] == "ur-PK-AsadNeural"          # ...is ignored for Urdu; the LLM's
+    assert set(fake.tts_calls) == {"ur-PK-AsadNeural"}         # English pick is rejected too
+    import json
+    manifest = json.loads(Path(snap.values["manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["language"] == "ur"
+
+
+def test_english_is_the_default_language(fake, graph):
+    start(graph)
+    resume(graph, {"action": "approve"})
+
+    assert "URDU" not in fake.writer_prompts[-1]
+    assert fake.tts_calls[0].startswith("en-")
+
+
+def test_urdu_version_of_a_finished_documentary(fake, graph):
+    from doc_agent.runs import fork_before_script
+    start(graph)
+    resume(graph, {"action": "approve"})
+    resume(graph, {"action": "render"})
+    searches = len(fake.researched)
+
+    assert fork_before_script(graph, config(), "Keep the same script", {"language": "ur"})
+    graph.invoke(None, config())                               # writes the Urdu script
+    snap = resume(graph, {"action": "approve"})
+
+    assert len(fake.researched) == searches                    # same research, reused
+    assert "URDU" in fake.writer_prompts[-1]
+    assert snap.values["language"] == "ur" and snap.values["voice"].startswith("ur-PK")

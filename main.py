@@ -20,6 +20,7 @@ from langgraph.types import Command  # noqa: E402
 
 from doc_agent.graph import build_graph  # noqa: E402
 from doc_agent.runs import fork_before_script, make_checkpointer  # noqa: E402
+from doc_agent.languages import LANGUAGES  # noqa: E402
 from doc_agent.styles import DEFAULT_STYLE, STYLES  # noqa: E402
 
 
@@ -138,6 +139,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("topic", nargs="?", help="Documentary topic (only for new runs)")
     parser.add_argument("--minutes", type=int, default=1)
+    parser.add_argument("--language", choices=list(LANGUAGES), default=None,
+                        help="narration language: en or ur (Urdu). With --fork: the new version's language")
     parser.add_argument("--style", choices=list(STYLES), default=DEFAULT_STYLE,
                         help="documentary, kids or short (vertical 60-second video)")
     parser.add_argument("--thread", default="default", help="Run ID; reuse it to resume")
@@ -172,7 +175,8 @@ def main() -> None:
             if not snapshot.values:
                 parser.error(f"thread '{args.thread}' doesn't exist yet")
             # Time travel (see runs.fork_before_script): branch from just after research
-            if not fork_before_script(graph, config, args.fork):
+            changes = {"language": args.language} if args.language else None
+            if not fork_before_script(graph, config, args.fork, changes):
                 print("No checkpoint before script_writer found in this thread.")
                 return
             print("⏪ Rewound to just after research (no script yet), writing a new version")
@@ -193,7 +197,8 @@ def main() -> None:
             if not args.topic:
                 parser.error("topic is required for a new thread")
             print(f"▶  Starting thread '{args.thread}': {args.topic}")
-            next_input = {"topic": args.topic, "target_minutes": args.minutes, "style": args.style}
+            next_input = {"topic": args.topic, "target_minutes": args.minutes, "style": args.style,
+                          "language": args.language or "en"}
 
         # Run -> pause at review -> ask human -> resume -> ... until the graph ends.
         while True:

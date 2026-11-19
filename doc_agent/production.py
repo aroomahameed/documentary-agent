@@ -43,8 +43,6 @@ from pydantic import Field
 
 from .llm import get_llm
 from .media import (
-    DEFAULT_VOICE,
-    VOICES,
     RateLimited,
     audio_duration,
     download,
@@ -55,6 +53,7 @@ from .media import (
 )
 from .prompts import IMAGE_CHECK_PROMPT, IMAGE_PICK_PROMPT, SHOT_PLAN_PROMPT, VOICE_PROMPT
 from .state import LLMOutput, ProducedScene, Scene, Shot
+from .languages import get_language
 from .styles import get_style
 
 # Errors a voice SERVICE can cause. Only these trigger the fallback voices; anything
@@ -110,6 +109,7 @@ class SceneState(TypedDict, total=False):
     voice: str              # chosen ONCE for the whole documentary (see choose_voice)
     notes: str              # director's notes when a scene is redone (production review)
     style: str              # style preset: decides the narrator's speed and pitch
+    language: str           # narration language: decides which voices may be used
     # filled by the parallel branches
     shots: list[Shot]
     audio_path: str
@@ -134,31 +134,35 @@ def progress(scene_number: int, message: str) -> None:
     get_stream_writer()({"scene": scene_number, "msg": message})
 
 
-def choose_voice(topic: str, voice_hint: str = "") -> tuple[str, str]:
+def choose_voice(topic: str, voice_hint: str = "", language: str | None = None) -> tuple[str, str]:
     """
     Pick ONE narrator for the whole documentary. Returns (voice, reason).
     Called once before the scenes are produced, so every scene sounds the same.
+    Only voices approved for the narration's LANGUAGE can be chosen.
     """
+    lang = get_language(language)
     forced = os.getenv("TTS_VOICE")
-    if forced:                                   # the human's choice always wins
+    if forced in lang.voices:                    # the human's choice wins (if it speaks this language)
         return forced, "set by TTS_VOICE in .env"
 
     catalog = "\n".join(
-        f"- {name}{' (default)' if name == DEFAULT_VOICE else ''}: {desc}"
-        for name, desc in VOICES.items()
+        f"- {name}{' (default)' if name == lang.default_voice else ''}: {desc}"
+        for name, desc in lang.voices.items()
     )
     choice = get_llm().with_structured_output(VoiceChoice).invoke([
         SystemMessage(VOICE_PROMPT.format(catalog=catalog)),
         HumanMessage(f"Documentary topic: {topic}"
                      + (f"\nThe style needs {voice_hint}." if voice_hint else "")),
     ])
-    if choice.voice not in VOICES:               # never trust a name the LLM made up
-        return DEFAULT_VOICE, f"'{choice.voice}' is not an approved voice, using the default"
+    if choice.voice not in lang.voices:          # never trust a name the LLM made up
+        return lang.default_voice, f"'{choice.voice}' is not an approved voice, using the default"
     return choice.voice, choice.reason
 
 
 def _tokens(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9']+", text.lower())
+    """Words of a text in ANY script: \\w also matches Urdu, Arabic, Hindi... letters.
+    (A-z only would find no words at all in Urdu, so every anchor would silently fail.)"""
+    return re.findall(r"\w+", text.lower())
 
 
 def anchor_start(narration_tokens: list[str], anchor: str) -> int | None:
@@ -387,8 +391,9 @@ def voiceover(state: SceneState) -> dict:
     """
     scene = state["scene"]
     path = Path(state["media_dir"]) / f"scene_{scene.scene_number:02d}.mp3"
-    chosen = state.get("voice") or DEFAULT_VOICE
-    order = [chosen] + [v for v in VOICES if v != chosen]
+    lang = get_language(state.get("language"))
+    chosen = state.get("voice") or lang.default_voice
+    order = [chosen] + [v for v in lang.voices if v != chosen]     # fall back within the language
 
     progress(scene.scene_number, f"recording narration ({chosen})")
     errors = []

@@ -131,6 +131,7 @@ class DocState(TypedDict, total=False):
     topic: str
     target_minutes: int
     style: str                         # Stage 7: "documentary", "kids" or "short" (see styles.py)
+    language: str                      # Stage 7: narration language, "en" or "ur" (see languages.py)
 
     # --- planner ---
     title: str

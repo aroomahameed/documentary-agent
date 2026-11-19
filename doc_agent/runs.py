@@ -57,16 +57,18 @@ def run_status(snapshot) -> str:
     return "new"
 
 
-def fork_before_script(graph, config: dict, notes: str) -> bool:
+def fork_before_script(graph, config: dict, notes: str, changes: dict | None = None) -> bool:
     """
     Time travel: branch from the ORIGINAL checkpoint just before the first script
-    was written (research done), with `notes` for the writer. The original timeline
-    stays in history. Returns False if there is no such checkpoint.
+    was written (research done), with `notes` for the writer. `changes` can also
+    change run settings for the new version, e.g. {"language": "ur"} for an Urdu
+    version of the same research. The original timeline stays in history.
+    Returns False if there is no such checkpoint.
     Afterwards, continue the run with graph.stream(None, config).
     """
     history = list(graph.get_state_history(config))          # newest first
     target = next((s for s in reversed(history) if s.next == ("script_writer",)), None)
     if target is None:
         return False
-    graph.update_state(target.config, {"human_feedback": notes})
+    graph.update_state(target.config, {"human_feedback": notes, **(changes or {})})
     return True

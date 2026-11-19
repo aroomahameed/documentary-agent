@@ -12,6 +12,7 @@ work is LangGraph:
   - stream_mode=["updates", "custom"] + subgraphs=True shows live progress
 """
 
+import html
 import json
 import re
 from datetime import datetime
@@ -27,6 +28,7 @@ from langgraph.types import Command  # noqa: E402
 from doc_agent.graph import build_graph  # noqa: E402
 from doc_agent.media import is_image  # noqa: E402
 from doc_agent.runs import fork_before_script, list_threads, make_checkpointer, run_status  # noqa: E402
+from doc_agent.languages import LANGUAGES, get_language  # noqa: E402
 from doc_agent.styles import STYLES, get_style  # noqa: E402
 
 st.set_page_config(page_title="Documentary Agent", page_icon="🎬", layout="wide")
@@ -109,6 +111,15 @@ def run(thread: str, graph_input) -> None:
     st.rerun()
 
 
+def narration(text: str) -> None:
+    """Show narration; Urdu is written right-to-left, so align it that way."""
+    if get_language(values.get("language")).rtl:
+        st.markdown(f'<div dir="rtl" style="text-align:right; font-size:1.15em; line-height:1.9">'
+                    f'{html.escape(text)}</div>', unsafe_allow_html=True)
+    else:
+        st.write(text)
+
+
 # --- Sidebar: new run + past runs -------------------------------------------
 
 with st.sidebar:
@@ -116,6 +127,7 @@ with st.sidebar:
     with st.form("new_run", clear_on_submit=True):
         topic = st.text_input("Topic", placeholder="e.g. History of the Taj Mahal")
         style = st.selectbox("Style", list(STYLES), format_func=lambda s: STYLES[s].label)
+        language = st.selectbox("Narration", list(LANGUAGES), format_func=lambda c: LANGUAGES[c].label)
         minutes = st.number_input("Length (minutes)", min_value=1, max_value=5, value=1,
                                   help="Ignored for the 60-second short")
         start = st.form_submit_button("Create documentary", type="primary")
@@ -136,7 +148,8 @@ if start and topic.strip():
     thread = f"{slug}-{datetime.now():%H%M%S}"
     st.session_state.thread = thread
     st.title(topic)
-    run(thread, {"topic": topic.strip(), "target_minutes": int(minutes), "style": style})
+    run(thread, {"topic": topic.strip(), "target_minutes": int(minutes), "style": style,
+                 "language": language})
 
 thread = st.session_state.get("thread")
 if not thread:
@@ -150,7 +163,8 @@ snapshot = graph.get_state(cfg(thread))
 values = snapshot.values
 status = run_status(snapshot)
 st.title(values.get("script").title if values.get("script") else values.get("topic", thread))
-st.caption(f"Run `{thread}` · {get_style(values.get('style')).label} · {STATUS_LABEL[status]}")
+st.caption(f"Run `{thread}` · {get_style(values.get('style')).label} · "
+           f"{get_language(values.get('language')).label} · {STATUS_LABEL[status]}")
 
 
 # --- Pages, one per run status ---------------------------------------------
@@ -160,7 +174,7 @@ if status == "script_review":
     for scene in values["script"].scenes:
         with st.container(border=True):
             st.markdown(f"**Scene {scene.scene_number}**")
-            st.write(scene.narration)
+            narration(scene.narration)
             st.caption(f"🎥 {scene.visual_description}")
     feedback = st.text_area("Feedback (to get a revised version)")
     left, right = st.columns(2)
@@ -194,7 +208,7 @@ elif status == "production_review":
             if len(shown) < len(p.shots):
                 st.warning(f"{len(p.shots) - len(shown)} image file(s) are broken and can't be "
                            "shown. Redo this scene to replace them.")
-            st.write(p.narration)
+            narration(p.narration)
             st.audio(p.audio_path)
             for problem in p.problems:
                 st.caption(f"⚠ {problem}")
@@ -238,8 +252,13 @@ elif status == "finished":
         st.subheader("Make another version (time travel)")
         st.caption("Rewinds to just after the research, so only the script and media are made again.")
         notes = st.text_input("Notes for the new version", placeholder="e.g. rewrite it for kids")
-        if st.button("⏪ Create new version", disabled=not notes.strip()):
-            if fork_before_script(graph, cfg(thread), notes.strip()):
+        current = values.get("language") or "en"
+        new_language = st.selectbox("Narration of the new version", list(LANGUAGES),
+                                    index=list(LANGUAGES).index(current),
+                                    format_func=lambda c: LANGUAGES[c].label)
+        if st.button("⏪ Create new version", disabled=not (notes.strip() or new_language != current)):
+            if fork_before_script(graph, cfg(thread), notes.strip() or "Keep the same script",
+                                  {"language": new_language}):
                 run(thread, None)
             else:
                 st.error("This run has no checkpoint from before the script was written.")

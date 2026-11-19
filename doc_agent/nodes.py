@@ -10,6 +10,7 @@ from .prompts import FACT_CHECKER_PROMPT, PLANNER_PROMPT, RESEARCHER_PROMPT, SCR
 from .state import DocState, FactCheckReport, ResearchNote, ResearchPlan, ResearchTask, Script
 from .tools import search_web, web_search, wikipedia_lookup
 from .production import choose_voice
+from .languages import get_language
 from .styles import get_style
 import json
 import os
@@ -134,6 +135,9 @@ def write_script(state: DocState) -> dict:
         max_scenes=max(5, minutes * 4),
     )
     prompt += f"\n\nStyle ({style.label}): {style.writer}"
+    language = get_language(state.get("language"))
+    if language.writer:
+        prompt += f"\n\nLanguage ({language.label}): {language.writer}"
     writer = get_llm().with_structured_output(Script)
     messages = [
         SystemMessage(prompt),
@@ -239,7 +243,7 @@ def start_production(state: DocState, config: RunnableConfig) -> dict:
     media_dir = Path("output") / f"{_slug(state['topic'])}-{thread}" / f"media-{stamp}"
 
     voice, reason = choose_voice(f"{state['topic']}. {state['script'].title}",
-                                 get_style(state.get("style")).voice_hint)
+                                 get_style(state.get("style")).voice_hint, state.get("language"))
     get_stream_writer()({"msg": f"🎙  Narrator: {voice} ({reason})"})
     return {"media_dir": str(media_dir), "voice": voice}
 
@@ -248,7 +252,8 @@ def dispatch_scenes(state: DocState) -> list[Send]:
     """Fan-out again: one scene_producer SUBGRAPH run per scene, all in parallel."""
     return [
         Send("scene_producer", {"scene": scene, "media_dir": state["media_dir"],
-                                "voice": state["voice"], "style": state.get("style")})
+                                "voice": state["voice"], "style": state.get("style"),
+                                "language": state.get("language")})
         for scene in state["script"].scenes
     ]
 
@@ -262,6 +267,7 @@ def collect_scenes(state: DocState) -> dict:
         "title": state["script"].title,
         "voice": state["voice"],
         "style": state.get("style"),
+        "language": state.get("language") or "en",
         "vertical": get_style(state.get("style")).vertical,
         "total_seconds": round(sum(s.duration_sec for s in scenes), 1),
         "scenes": [s.model_dump() for s in scenes],
@@ -334,7 +340,8 @@ def production_review(state: DocState) -> Command[Literal["render_video", "scene
     # The merge_scenes reducer then REPLACES those scenes and keeps all the others.
     return Command(goto=[
         Send("scene_producer", {"scene": scenes[n], "media_dir": state["media_dir"],
-                                "voice": state["voice"], "style": state.get("style"), "notes": note})
+                                "voice": state["voice"], "style": state.get("style"),
+                                "language": state.get("language"), "notes": note})
         for n, note in sorted(redo.items())
     ])
 

@@ -65,6 +65,9 @@ a statue of Emperor Vespasian, a map of ancient Rome. NOT four views of the Colo
 
 For each shot give 2-3 SHORT search queries (2-4 words), most specific first.
 Queries are NAMES of things ("Humayun's Tomb"), never descriptions of a picture.
+Queries are ALWAYS in English (the image library is English), even when the
+narration is in another language. The anchor is copied from the narration in
+ITS language.
 Examples: ["Roman Colosseum", "Colosseum interior"], ["Charles Darwin portrait", "Darwin"],
 ["volcano eruption", "lava flow"], ["DNA double helix diagram", "DNA illustration"].
 No adjectives like "beautiful" or "aerial".
