@@ -61,6 +61,7 @@ class Fake:
         self.tts_fails = False
         self.tts_style = None
         self.voice_failures: dict[str, int] = {}
+        self.voice_fails_for = None             # narration text the failures apply to (None = any)
         self.editor_report = editor.EditorReport(summary="Looks good.", suggestions=[])
         self.editor_inputs: list[str] = []
         self.editor_tools = []
@@ -175,11 +176,14 @@ class Fake:
     def text_to_speech(self, text, path, voice=None, rate=None, pitch=None):
         if self.tts_fails:
             raise ConnectionError("TTS down")
-        if self.voice_failures.get(voice, 0) > 0:          # this voice fails N more times
+        # Scenes are produced in PARALLEL threads, so a failure counter shared by all
+        # scenes would make tests depend on thread timing (flaky). Failures can be
+        # limited to ONE scene's narration with `voice_fails_for`.
+        self.tts_attempts.append((voice, text))
+        targeted = self.voice_fails_for is None or text == self.voice_fails_for
+        if targeted and self.voice_failures.get(voice, 0) > 0:   # this voice fails N more times
             self.voice_failures[voice] -= 1
-            self.tts_attempts.append(voice)
             raise ConnectionError(f"{voice} hiccup")
-        self.tts_attempts.append(voice)
         self.tts_calls.append(voice)
         self.tts_style = (rate, pitch)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -733,11 +737,13 @@ def test_short_voice_failure_retries_the_same_voice(fake, graph):
 
 
 def test_voice_switch_is_last_resort_and_flagged(fake, graph):
-    fake.voice_failures = {"en-GB-RyanNeural": 3}             # 3 failures: scene 1 must switch
+    fake.voice_failures = {"en-GB-RyanNeural": 3}             # 3 failures, all in scene 2,
+    fake.voice_fails_for = "Second scene."                    # so scene 2 must switch voice
     start(graph)
     snap = resume(graph, {"action": "approve"})
 
-    assert fake.tts_attempts[:4] == ["en-GB-RyanNeural"] * 3 + ["en-US-AndrewMultilingualNeural"]
+    scene2 = [voice for voice, text in fake.tts_attempts if text == "Second scene."]
+    assert scene2 == ["en-GB-RyanNeural"] * 3 + ["en-US-AndrewMultilingualNeural"]
     assert any("narrated by en-US-AndrewMultilingualNeural instead of en-GB-RyanNeural" in i
                for i in snap.values["quality_issues"])
 
