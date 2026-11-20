@@ -325,6 +325,8 @@ def production_review(state: DocState) -> Command[Literal["render_video", "scene
     """
     decision = interrupt({"type": "production_review",
                           "issues": state.get("quality_issues", []),
+                          "editor_summary": state.get("editor_summary", ""),
+                          "suggestions": state.get("editor_suggestions", {}),
                           "media_dir": state["media_dir"]})
 
     action = decision.get("action")

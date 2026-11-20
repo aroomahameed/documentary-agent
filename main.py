@@ -104,9 +104,16 @@ def ask_production(values: dict, review: dict) -> dict:
             print(f"   - {issue}")
     else:
         print("\n✓  Quality check: all files OK")
+    suggestions = review.get("suggestions") or {}
+    if review.get("editor_summary"):
+        print(f"\n🧑‍💼 AI editor: {review['editor_summary']}")
+    for n, note in sorted(suggestions.items()):
+        print(f"   suggests redo of scene {n}: {note}")
     print("=" * 70)
     print("Open the folder above and look at the images first. Then:")
     print("   Enter              -> render the video")
+    if suggestions:
+        print("   a                  -> accept the editor's suggestions (redo those scenes)")
     print("   redo 3: <notes>    -> re-produce scene 3 with your notes")
     print("                         (several: redo 1: use a map; 4: more paintings)")
     print("   stop               -> keep the media, don't render")
@@ -116,6 +123,8 @@ def ask_production(values: dict, review: dict) -> dict:
         return {"action": "render"}
     if answer.lower() == "stop":
         return {"action": "stop"}
+    if answer.lower() == "a" and suggestions:
+        return {"action": "redo", "scenes": dict(suggestions)}
     scenes = {}
     if answer.lower().startswith("redo"):
         for part in answer[4:].split(";"):

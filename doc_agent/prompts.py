@@ -121,3 +121,22 @@ PEOPLE from history: they can't be recognised from the picture alone, so:
 PLACES, buildings, objects and events: showing the right subject is enough,
 even from a different angle than described. A historical painting of the place
 also matches."""
+
+# --- Stage 7: the AI editor ----------------------------------------------------
+
+EDITOR_PROMPT = """You are the editor of a documentary. The scenes are produced: each has
+narration and shots (images timed to the words in quotes). Review it like a human editor.
+
+Find the scenes that would improve MOST with a redo of their images, e.g.:
+- an image that doesn't show what the narration says at that moment
+- title cards (no image found) or a single image for a long scene
+- the same subject shown again and again
+- a scene narrated by a different voice (a redo re-records it)
+If an image's title doesn't make clear what it shows, use look_at_shot to look at it.
+You have {looks} looks: spend them on the doubtful images, not on obvious ones.
+
+Suggest at most {max} redos, most important first. Each note must be concrete and
+actionable for the picture editor: name the real subjects to show and at which words,
+e.g. "show a portrait of Shah Jahan at 'built by Shah Jahan', not a modern street".
+Don't suggest redos for things a redo can't fix (the narration text itself, or
+subjects that free image libraries won't have). If the documentary is fine, suggest nothing."""

@@ -190,6 +190,11 @@ elif status == "production_review":
         st.warning("Quality check:\n\n" + "\n".join(f"- {i}" for i in issues))
     else:
         st.success("Quality check: all files OK")
+    suggestions = values.get("editor_suggestions") or {}
+    if values.get("editor_summary"):
+        st.info(f"🧑‍💼 **AI editor:** {values['editor_summary']}"
+                + (f"\n\nIts {len(suggestions)} suggestion(s) are filled in below: edit or delete "
+                   "them, then click Redo. Or just render." if suggestions else ""))
     st.caption("Write a note under any scene you want redone, e.g. *use a map of the empire*.")
 
     # Note fields get a "round" in their key: after a redo the round goes up, so the
@@ -213,6 +218,7 @@ elif status == "production_review":
             for problem in p.problems:
                 st.caption(f"⚠ {problem}")
             notes[p.scene_number] = st.text_input("Redo note", key=f"note_{thread}_{round_no}_{p.scene_number}",
+                                                  value=suggestions.get(p.scene_number, ""),   # editor's idea
                                                   placeholder="leave empty to keep this scene")
 
     redo = {n: note.strip() for n, note in notes.items() if note.strip()}

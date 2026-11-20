@@ -158,6 +158,8 @@ class DocState(TypedDict, total=False):
 
     # --- video (Stage 5) ---
     quality_issues: list[str]          # found by code in quality_check, shown at production review
+    editor_summary: str                # Stage 7: the AI editor's overall verdict
+    editor_suggestions: dict[int, str] # Stage 7: scene number -> suggested redo note
     video_path: str
 
 

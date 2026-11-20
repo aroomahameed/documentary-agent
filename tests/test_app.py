@@ -129,3 +129,15 @@ def test_urdu_narration_is_shown_right_to_left(app, fake):  # noqa: F811
     assert not app.exception
     assert "اردو" in app.caption[0].value                     # the run's language is shown
     assert any('dir="rtl"' in m.value for m in app.markdown)  # narration aligned right-to-left
+
+
+def test_editor_suggestions_are_prefilled_in_the_app(app, fake):  # noqa: F811
+    from doc_agent import editor
+    fake.editor_report = editor.EditorReport(summary="Scene 2 needs a map.", suggestions=[
+        editor.Suggestion(scene_number=2, note="show a map of the empire", reason="r")])
+    create(app)
+    button(app, "✅ Approve").click().run()
+
+    assert any("AI editor" in i.value for i in app.info)
+    assert app.main.text_input[1].value == "show a map of the empire"   # scene 2's note field
+    assert not button(app, "🔁 Redo").disabled                          # one click to accept

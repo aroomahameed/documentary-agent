@@ -8,7 +8,7 @@ Main graph (Stages 1-4):
     human_review -(feedback)-> script_writer                  (revision loop)
     human_review -(approve)-> start_production                (pick folder + narrator)
     start_production -(Send x scenes)-> scene_producer        (SUBGRAPH, in parallel)
-    scene_producer -> collect_scenes -> quality_check -> production_review
+    scene_producer -> collect_scenes -> quality_check -> editor_review -> production_review
     production_review -(redo, Send)-> scene_producer          (only the chosen scenes)
     production_review -(render)-> render_video -> END
     production_review -(stop)-> END
@@ -31,6 +31,7 @@ from .nodes import (
     start_production,
     write_script,
 )
+from .editor import editor_review
 from .production import build_scene_graph
 from .state import DocState
 
@@ -47,6 +48,7 @@ def build_graph(checkpointer=None):
     builder.add_node("scene_producer", build_scene_graph())   # a compiled SUBGRAPH as a node
     builder.add_node("collect_scenes", collect_scenes)
     builder.add_node("quality_check", quality_check)
+    builder.add_node("editor_review", editor_review)
     builder.add_node("production_review", production_review)
     builder.add_node("render_video", render_documentary)
 
@@ -61,7 +63,8 @@ def build_graph(checkpointer=None):
     builder.add_conditional_edges("start_production", dispatch_scenes, ["scene_producer"])
     builder.add_edge("scene_producer", "collect_scenes")      # fan-in: waits for every scene
     builder.add_edge("collect_scenes", "quality_check")
-    builder.add_edge("quality_check", "production_review")
+    builder.add_edge("quality_check", "editor_review")       # Stage 7: the AI editor suggests...
+    builder.add_edge("editor_review", "production_review")   # ...the human decides
     # production_review routes itself with Command: render_video, scene_producer (redo) or END
     builder.add_edge("render_video", END)
     # No edges OUT of human_review: it returns Command(goto=...) itself.

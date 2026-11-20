@@ -15,7 +15,7 @@ from PIL import Image
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from doc_agent import nodes, production
+from doc_agent import editor, nodes, production
 from doc_agent.graph import build_graph
 from doc_agent.state import (
     ClaimCheck,
@@ -61,6 +61,9 @@ class Fake:
         self.tts_fails = False
         self.tts_style = None
         self.voice_failures: dict[str, int] = {}
+        self.editor_report = editor.EditorReport(summary="Looks good.", suggestions=[])
+        self.editor_inputs: list[str] = []
+        self.editor_tools = []
         self.tts_attempts: list[str] = []
         self.planner_prompts: list[str] = []
         self.plan_requests: list[str] = []  # what the shot planner was asked (per scene)
@@ -107,6 +110,8 @@ class Fake:
                     )
                 if schema is production.ImageChoice:
                     return production.ImageChoice(number=1, reason="test")
+                if schema is editor.ImageDescription:
+                    return editor.ImageDescription(shows="a stone fort")
                 if schema is production.ImageCheck:
                     return production.ImageCheck(shows="a fort", matches=True)
                 raise ValueError(f"unexpected schema {schema}")
@@ -123,6 +128,15 @@ class Fake:
     # --- the fact-checker agent ---
     def create_agent(self, model, tools, system_prompt, response_format):
         fake = self
+        if response_format is editor.EditorReport:                 # Stage 7: the AI editor
+            class Editor:
+                def invoke(self, inputs, config=None):
+                    fake.editor_inputs.append(inputs["messages"][0].content)
+                    fake.editor_tools = tools
+                    if isinstance(fake.editor_report, Exception):
+                        raise fake.editor_report
+                    return {"structured_response": fake.editor_report}
+            return Editor()
 
         class Agent:
             def invoke(self, inputs, config=None):
@@ -181,6 +195,8 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(nodes, "get_llm", lambda: f)
     monkeypatch.setattr(nodes, "web_search", f.web_search)
     monkeypatch.setattr(nodes, "create_agent", f.create_agent)
+    monkeypatch.setattr(editor, "create_agent", f.create_agent)
+    monkeypatch.setattr(editor, "get_llm", lambda: f)
     monkeypatch.setattr(production, "get_llm", lambda: f)
     monkeypatch.setattr(production, "search_photos", f.search_photos)
     monkeypatch.setattr(production, "download", f.download)
@@ -729,3 +745,59 @@ def test_voice_switch_is_last_resort_and_flagged(fake, graph):
     produced_scene = [p for p in snap.values["produced_scenes"] if p.voice != "en-GB-RyanNeural"][0]
     snap = resume(graph, {"action": "redo", "scenes": {produced_scene.scene_number: "re-record"}})
     assert snap.values["quality_issues"] == []
+
+
+# ---------------------------------------------------------------------------
+# Stage 7: the AI editor (suggests, the human decides)
+# ---------------------------------------------------------------------------
+
+def suggestion(n, note="show the Red Fort at 'the Red Fort'"):
+    return editor.Suggestion(scene_number=n, note=note, reason="test")
+
+
+def test_editor_suggestions_reach_the_production_review(fake, graph):
+    fake.editor_report = editor.EditorReport(summary="Scene 2 is weak.", suggestions=[suggestion(2)])
+    snap = produced(graph)
+
+    review = snap.interrupts[0].value
+    assert review["editor_summary"] == "Scene 2 is weak."
+    assert review["suggestions"] == {2: "show the Red Fort at 'the Red Fort'"}
+    assert "Scene 1" in fake.editor_inputs[-1] and "Draft" in fake.editor_inputs[-1]   # it saw the scenes
+
+
+def test_editor_suggestions_are_validated(fake, graph):
+    fake.editor_report = editor.EditorReport(summary="s", suggestions=[
+        suggestion(99), suggestion(1, "  "), suggestion(2, "first"), suggestion(2, "duplicate"),
+        suggestion(1, "ok")])
+    snap = produced(graph)
+
+    assert snap.values["editor_suggestions"] == {2: "first", 1: "ok"}   # no fake scene, no empty note
+
+
+def test_accepting_suggestions_redoes_those_scenes(fake, graph):
+    fake.editor_report = editor.EditorReport(summary="s", suggestions=[suggestion(2, "use a map")])
+    snap = produced(graph)
+    tts_before = len(fake.tts_calls)
+
+    snap = resume(graph, {"action": "redo", "scenes": snap.interrupts[0].value["suggestions"]})
+    assert len(fake.tts_calls) == tts_before + 1
+    assert "use a map" in fake.plan_requests[-1]
+
+
+def test_a_failing_editor_never_blocks_the_review(fake, graph):
+    fake.editor_report = ConnectionError("network down")
+    snap = produced(graph)
+
+    assert snap.next == ("production_review",)
+    assert "couldn't finish" in snap.values["editor_summary"]
+    assert snap.values["editor_suggestions"] == {}
+
+
+def test_look_tool_has_a_budget_enforced_in_code(fake, graph):
+    snap = produced(graph)
+    look = editor.make_look_tool(snap.values["produced_scenes"])
+
+    assert "no shot 9" in look.invoke({"scene_number": 1, "shot_number": 9})
+    for _ in range(editor.MAX_LOOKS):
+        assert look.invoke({"scene_number": 1, "shot_number": 1}) == "a stone fort"
+    assert "budget used up" in look.invoke({"scene_number": 1, "shot_number": 1})
