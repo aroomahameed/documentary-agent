@@ -1,3 +1,4 @@
+
 langgraph>=1.0
 langchain>=1.0
 langchain-openai
@@ -8,8 +9,10 @@ pytest
 langchain-anthropic
 langgraph-checkpoint-sqlite
 requests
-edge-tts                  
-moviepy   
-mutagen          
-streamlit                  
-# langchain-mcp-adapters mcp    # Stage 8
+edge-tts                      # Stage 5
+moviepy                       # Stage 6
+mutagen
+pillow
+streamlit                     # Stage 7
+mcp[cli]>=1.24,<2             # Stage 8 (adapters need mcp 1.x)
+langchain-mcp-adapters
